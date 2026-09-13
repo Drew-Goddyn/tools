@@ -4,6 +4,8 @@ Record with **⌘⇧5**. A smaller, verified copy appears in **`~/Downloads/scre
 
 macOS launches the processor when the recording folder changes. It waits for unfinished recordings, processes them, and **exits completely when there is no work left**. There is no resident helper, periodic scan, or idle timer. This is a personal convenience tool; a missed notification or crash can require a manual rerun.
 
+To rebuild this tool with an agent, use the [rebuild prompt](PROMPT.md).
+
 ## One-click install
 
 1. [Download this repository as a ZIP](https://github.com/Drew-Goddyn/tools/archive/refs/heads/main.zip) and extract it, or clone it.
