@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.build/
+
+# Never commit local recordings, ledgers, or logs.
+screen-recording-cleaner/verification.json
+screen-recording-cleaner/evidence/
+screen-recording-cleaner/state/
+*.mov
+*.mp4
+*.log
