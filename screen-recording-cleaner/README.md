@@ -10,6 +10,16 @@ The icon starts near the clock, with progress percentages inside the menu so it 
 
 To rebuild this tool with an agent, use the [rebuild prompt](PROMPT.md).
 
+## Menu bar progress
+
+**Waiting for the recording to finish:**
+
+![Film icon with its menu open, showing the recording name and time spent waiting](docs/images/menu-waiting.png)
+
+**Compressing, with frame progress and elapsed time:**
+
+![Progress menu showing compression at 37 percent, 481 of 1298 frames, and the time since the last frame advance](docs/images/menu-compressing.png)
+
 ## One-click install
 
 1. [Download this repository as a ZIP](https://github.com/Drew-Goddyn/tools/archive/refs/heads/main.zip) and extract it, or clone it.
