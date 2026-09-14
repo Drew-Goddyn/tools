@@ -113,25 +113,17 @@ class Cleaner:
         return [self.c["ffmpeg"], "-hide_banner", "-loglevel", "error", "-xerror",
                 "-nostdin", "-y", "-threads", str(self.c["threads"]), "-i", str(source)] + args
 
-    def encode(self, source, target, info, work, bitrate=None, pass_number=None):
+    def encode(self, source, target, info):
         audio = [s for s in info["streams"] if s["codec_type"] == "audio"]
         args = ["-map", "0:v:0", "-c:v", "libx264", "-preset", "slow", "-threads",
                 str(self.c["threads"]), "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
                 "-enc_time_base", "demux"]
-        if bitrate is None:
-            args += ["-crf", str(self.c["crf"])]
+        args += ["-crf", str(self.c["crf"]), "-map", "0:a?"]
+        if all(s["codec_name"] in ("aac", "alac") for s in audio):
+            args += ["-c:a", "copy"]
         else:
-            args += ["-b:v", str(bitrate), "-pass", str(pass_number),
-                     "-passlogfile", str(work / "two-pass")]
-        if pass_number == 1:
-            args += ["-an", "-f", "null", os.devnull]
-        else:
-            args += ["-map", "0:a?"]
-            if all(s["codec_name"] in ("aac", "alac") for s in audio):
-                args += ["-c:a", "copy"]
-            else:
-                args += ["-c:a", "aac", "-b:a", "192k"]
-            args += ["-movflags", "+faststart", str(target)]
+            args += ["-c:a", "aac", "-b:a", "192k"]
+        args += ["-movflags", "+faststart", str(target)]
         run(self.ffmpeg(source, args))
 
     def validate(self, source_info, target):
@@ -155,20 +147,6 @@ class Cleaner:
         run(self.ffmpeg(target, ["-map", "0:v", "-map", "0:a?", "-f", "null", os.devnull]))
         return info
 
-    def similarity(self, source, target, work):
-        stats = work / "similarity.log"
-        filters = ("[0:v]settb=AVTB,setpts=N/(60*TB)[a];"
-                   "[1:v]settb=AVTB,setpts=N/(60*TB)[b];"
-                   f"[a][b]ssim=stats_file={stats}")
-        run(self.ffmpeg(target, ["-threads", str(self.c["threads"]), "-i", str(source),
-                                "-filter_complex_threads", str(self.c["threads"]),
-                                "-filter_complex", filters, "-an", "-f", "null", os.devnull]))
-        values = sorted(float(word[4:]) for line in stats.read_text().splitlines()
-                        for word in line.split() if word.startswith("All:"))
-        if not values:
-            raise RuntimeError("Quality comparison produced no frames")
-        return {"mean": sum(values) / len(values), "p05": values[int((len(values) - 1) * .05)]}
-
     def process(self, source, entry):
         before = signature(source)
         self.output.mkdir(parents=True, exist_ok=True)
@@ -191,7 +169,6 @@ class Cleaner:
             self.write()
             selected = work / ("recording" + source.suffix)
             decision = "already_small" if before[2] < self.c["max_bytes"] else "original_format_preserved"
-            quality = None
             if before[2] < self.c["max_bytes"] or not supported:
                 shutil.copyfile(source, selected)
                 if digest(source) != digest(selected):
@@ -199,24 +176,9 @@ class Cleaner:
                 self.validate(info, selected)
             else:
                 selected = work / "quality.mp4"
-                self.encode(source, selected, info, work)
+                self.encode(source, selected, info)
                 self.validate(info, selected)
                 decision = "quality_encode"
-                if selected.stat().st_size >= self.c["max_bytes"]:
-                    audio = [s for s in info["streams"] if s["codec_type"] == "audio"]
-                    audio_rate = sum(int(s.get("bit_rate") or 256000)
-                                     if s["codec_name"] in ("aac", "alac") else 192000 for s in audio)
-                    bitrate = int(self.c["max_bytes"] * .95 * 8 / float(info["format"]["duration"])) - audio_rate
-                    if bitrate >= 64000:
-                        capped = work / "capped.mp4"
-                        self.encode(source, capped, info, work, bitrate, 1)
-                        self.encode(source, capped, info, work, bitrate, 2)
-                        self.validate(info, capped)
-                        quality = self.similarity(source, capped, work)
-                        acceptable = quality["mean"] >= .99 and quality["p05"] >= .98
-                        if capped.stat().st_size < self.c["max_bytes"] and acceptable:
-                            selected = capped
-                            decision = "size_encode"
                 if selected.stat().st_size >= before[2]:
                     selected = work / ("original" + source.suffix)
                     shutil.copyfile(source, selected)
@@ -240,7 +202,7 @@ class Cleaner:
                 self.write()
                 os.link(selected, target)  # Atomic, same filesystem, never replaces another file.
             entry.update(status="done", output=str(target), bytes=target.stat().st_size,
-                         decision=decision, similarity=quality, completed_at=time.time(),
+                         decision=decision, similarity=None, completed_at=time.time(),
                          under_limit=target.stat().st_size < self.c["max_bytes"])
             entry.pop("error", None)
             self.write()

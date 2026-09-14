@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 HERE = Path(__file__).parent
 spec = importlib.util.spec_from_file_location("cleaner", HERE / "cleaner.py")
@@ -137,7 +138,7 @@ class QueueTests(unittest.TestCase):
         before = cleaner.digest(source)
         self.c.c["max_bytes"] = 150000
         entry = self.complete(source)
-        self.assertIn(entry["decision"], ("quality_encode", "size_encode"))
+        self.assertEqual(entry["decision"], "quality_encode")
         output = self.c.probe(Path(entry["output"]), count=True)
         v = next(s for s in output["streams"] if s["codec_type"] == "video")
         a = next(s for s in output["streams"] if s["codec_type"] == "audio")
@@ -145,17 +146,19 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(a["channels"], 2)
         self.assertEqual(cleaner.digest(source), before)
 
-    def test_noticeable_size_target_loss_keeps_larger_quality_copy(self):
+    def test_soft_size_target_keeps_quality_copy_without_additional_encodes(self):
         self.c.initialize()
         source = self.source / "Motion.mov"
         subprocess.run([FFMPEG, "-v", "error", "-i", str(self.movie), "-c:v", "copy",
                         "-an", str(source)], check=True)
         self.c.c["max_bytes"] = 26000
-        entry = self.complete(source)
+        with patch.object(self.c, 'encode', wraps=self.c.encode) as encode:
+            entry = self.complete(source)
+        self.assertEqual(encode.call_count, 1)
         self.assertEqual(entry["decision"], "quality_encode")
         self.assertFalse(entry["under_limit"])
-        self.assertIsNotNone(entry["similarity"])
-        self.assertLess(entry["similarity"]["mean"], .99)
+        self.assertIsNone(entry["similarity"])
+        self.assertLess(entry['bytes'], source.stat().st_size)
 
     def test_changed_source_during_encoding_is_not_published(self):
         self.c.initialize()

@@ -24,14 +24,14 @@ Terminal, Codex, and this downloaded package can all be closed afterward. The in
 - New immediate `.mov` and `.mp4` files are eligible. Screenshots, hidden files, symlinks, and nested folders are ignored.
 - A recording must keep the same size and modification time for **30 seconds** and have no open writer before processing starts. Encoding and validation take additional time.
 - Finished names end in `- clean`. Destination files are never overwritten. Recordings present before first installation stay excluded.
-- The preferred size is **under 20,000,000 bytes**, with **picture quality taking priority**. Longer or complex recordings can stay larger.
+- **20,000,000 bytes is a soft target**, with **picture quality and processing time taking priority**. A large reduction is useful even when the result stays above 20 MB; the cleaner keeps that result without extra size-targeting passes.
 - Notifications are requested for failures and files retained above 20 MB. Routine completion is quiet.
 
 ## Quality and original protection
 
 Files already under the target are copied exactly, preserving their container. Larger standard SDR recordings are encoded as H.264 MP4 at the original resolution and frame timing, using CRF 18 and four encoder threads. AAC and ALAC audio are copied; other audio formats are converted to AAC. HDR, rotated, and higher-bit-depth recordings keep their original format.
 
-If the high-quality encode still exceeds the target, a smaller two-pass encode is accepted only when its frame-by-frame SSIM comparison has a mean of at least 0.99 and a fifth percentile of at least 0.98. Otherwise the high-quality copy is kept. If encoding increases size, the original is copied. These automated comparisons do not promise perceptual identity.
+The cleaner makes one high-quality encode and keeps it, even above 20 MB. It does not run additional bitrate-targeted encodes or comparisons just to cross that threshold. If encoding increases size, the original is copied.
 
 Validation checks decoding, dimensions, duration, decoded frame counts, audio track/channel counts, and whether the source changed. Publication is atomic and never replaces a file. Saved publication intent allows interrupted publication to recover without duplicating a finished copy.
 
