@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import setup
 import upgrade
+from build_progress import build_progress
 from cleaner import digest
 
 BUNDLE = Path(__file__).resolve().parent
@@ -70,8 +71,12 @@ class SetupTests(unittest.TestCase):
     def release(self):
         release = self.root / 'next release'
         release.mkdir()
-        for name in ('cleaner.py', 'README.md', 'install.py'):
+        for name in ('cleaner.py', 'progress.py', 'README.md', 'install.py', 'build_progress.py', 'ProgressMenu.swift', 'ProgressInfo.plist'):
             shutil.copy2(BUNDLE / name, release / name)
+        # Reuse the identical, already compiled UI when only README changes.
+        built = build_progress(BUNDLE)
+        (release / '.build').mkdir()
+        shutil.copy2(built, release / '.build' / built.name)
         (release / 'README.md').write_text('Documentation for a later release\n')
         return release / 'upgrade.py'
 

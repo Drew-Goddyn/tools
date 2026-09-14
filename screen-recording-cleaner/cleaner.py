@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from progress import Progress, run_ffmpeg
 
 
 def signature(path):
@@ -61,8 +62,9 @@ def snapshot(folder):
 
 
 class Cleaner:
-    def __init__(self, config):
+    def __init__(self, config, progress=None):
         self.c = config
+        self.progress = progress
         self.source = Path(config["source"])
         self.output = Path(config["output"])
         self.state_dir = Path(config["state_dir"])
@@ -124,9 +126,21 @@ class Cleaner:
         else:
             args += ["-c:a", "aac", "-b:a", "192k"]
         args += ["-movflags", "+faststart", str(target)]
-        run(self.ffmpeg(source, args))
+        self.show_progress('Compressing', info=info)
+        run_ffmpeg(self.ffmpeg(source, args), self.progress)
+
+    def show_progress(self, phase, filename=None, info=None):
+        if self.progress is not None:
+            frames = None
+            if info is not None:
+                video = next(s for s in info['streams'] if s['codec_type'] == 'video')
+                count = str(video.get('nb_read_frames', ''))
+                frames = int(count) if count.isdigit() and int(count) > 0 else None
+            self.progress.show(phase, filename=filename, total_frames=frames,
+                               duration=float(info['format']['duration']) if info is not None else None)
 
     def validate(self, source_info, target):
+        self.show_progress('Checking frame counts')
         info = self.probe(target, count=True)
         source_v = next(s for s in source_info["streams"] if s["codec_type"] == "video")
         target_v = next(s for s in info["streams"] if s["codec_type"] == "video")
@@ -144,12 +158,14 @@ class Cleaner:
                 raise RuntimeError("Audio verification failed: channel count changed")
             if "duration" in a and "duration" in b and abs(float(a["duration"]) - float(b["duration"])) > 0.15:
                 raise RuntimeError("Audio verification failed: track duration changed")
-        run(self.ffmpeg(target, ["-map", "0:v", "-map", "0:a?", "-f", "null", os.devnull]))
+        self.show_progress('Verifying playback', info=source_info)
+        run_ffmpeg(self.ffmpeg(target, ["-map", "0:v", "-map", "0:a?", "-f", "null", os.devnull]), self.progress)
         return info
 
     def process(self, source, entry):
         before = signature(source)
         self.output.mkdir(parents=True, exist_ok=True)
+        self.show_progress('Inspecting original', filename=source.name)
         info = self.probe(source, count=True)
         vid = [s for s in info["streams"] if s["codec_type"] == "video"]
         if len(vid) != 1 or float(info["format"].get("duration", 0)) <= 0:
@@ -170,7 +186,9 @@ class Cleaner:
             selected = work / ("recording" + source.suffix)
             decision = "already_small" if before[2] < self.c["max_bytes"] else "original_format_preserved"
             if before[2] < self.c["max_bytes"] or not supported:
+                self.show_progress('Copying original')
                 shutil.copyfile(source, selected)
+                self.show_progress('Checking copy')
                 if digest(source) != digest(selected):
                     raise RuntimeError("Original copy verification failed")
                 self.validate(info, selected)
@@ -180,11 +198,13 @@ class Cleaner:
                 self.validate(info, selected)
                 decision = "quality_encode"
                 if selected.stat().st_size >= before[2]:
+                    self.show_progress('Keeping the smaller original')
                     selected = work / ("original" + source.suffix)
                     shutil.copyfile(source, selected)
                     if digest(source) != digest(selected):
                         raise RuntimeError("Original copy verification failed")
                     decision = "original_smaller"
+            self.show_progress('Saving finished copy')
             if signature(source) != before:
                 raise RuntimeError("Recording changed during processing; waiting for the completed file")
             checksum = digest(selected)
@@ -308,6 +328,7 @@ def drain(config):
         save(status_path, status)
 
     transition('processing')
+    progress = Progress(config)
     watcher = select.kqueue()
     folder_fd = None
     try:
@@ -318,7 +339,7 @@ def drain(config):
         while True:
             # The ledger lock covers a scan/encode, not a retry sleep. Installation
             # can therefore wait for encoding, then stop this job safely.
-            cleaner = Cleaner(config)
+            cleaner = Cleaner(config, progress=progress)
             try:
                 before = snapshot(cleaner.source)
                 status['scans'] += 1
@@ -348,6 +369,9 @@ def drain(config):
                            for item in pending)
             status['waits'] += 1
             transition('waiting', deadline)
+            item = min(pending, key=lambda item: item['next_check_at'] or deadline)
+            progress.show('Waiting to retry' if item['state'] == 'retry' else 'Waiting for recording to finish',
+                          filename=Path(item['path']).name)
             # Only while work remains: a new arrival wakes a pending retry early.
             watcher.control(None, 1, max(0, deadline - time.time()))
             transition('processing')
@@ -358,6 +382,7 @@ def drain(config):
         watcher.close()
         if folder_fd is not None:
             os.close(folder_fd)
+        progress.close()
 
 
 def main():
@@ -391,6 +416,8 @@ def main():
     if args.action == "init":
         cleaner.initialize()
     elif args.action == "scan":
+        progress = Progress(config)
+        cleaner.progress = progress
         try:
             result = cleaner.scan()
             if cleaner.state.pop("service_error", None) is not None:
@@ -405,6 +432,8 @@ def main():
                 cleaner.write()
             print(json.dumps({"version": 1, "pending": [], "error": str(error)}))
             raise SystemExit(1)
+        finally:
+            progress.close()
 
 
 if __name__ == "__main__":

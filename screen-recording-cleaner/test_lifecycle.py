@@ -46,6 +46,7 @@ class LifecycleTests(unittest.TestCase):
         self.config_path = self.support / 'config.json'
         self.config_path.write_text(json.dumps(self.config))
         shutil.copy2(Path(__file__).with_name('cleaner.py'), self.support / 'cleaner.py')
+        shutil.copy2(Path(__file__).with_name('progress.py'), self.support / 'progress.py')
         instance = Cleaner(self.config)
         instance.initialize()
         instance.lock.close()

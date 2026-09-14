@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
+from progress import UI_BINARY
 
 
 def observe(support, label, seconds=300, interval=10):
@@ -25,11 +26,20 @@ def observe(support, label, seconds=300, interval=10):
             path = support / name
             files[name] = ({'mtime_ns': path.stat().st_mtime_ns,
                             'sha256': hashlib.sha256(path.read_bytes()).hexdigest()} if path.exists() else None)
-        return {'service': fields, 'files': files}
+        runner_path = support / 'state/runner.json'
+        worker_pid = json.loads(runner_path.read_text()).get('pid') if runner_path.exists() else None
+        processes = subprocess.run(['/bin/ps', '-axo', 'pid=,ppid=,pgid=,comm='],
+                                   capture_output=True, text=True, check=True).stdout
+        owned = []
+        for line in processes.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) == 4 and (int(parts[2]) == worker_pid or parts[3] == str(support / UI_BINARY)):
+                owned.append({'pid': int(parts[0]), 'process': parts[3]})
+        return {'service': fields, 'files': files, 'owned_processes': owned}
 
     started = time.monotonic()
     first = sample()
-    if first['service']['pid'] or first['service']['state'] != 'not running':
+    if first['service']['pid'] or first['service']['state'] != 'not running' or first['owned_processes']:
         raise RuntimeError('The processor is still running; finish pending work before observing idle')
     if first['service']['last exit code'] != '0':
         raise RuntimeError('The last run did not exit successfully')

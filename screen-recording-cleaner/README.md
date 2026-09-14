@@ -4,6 +4,8 @@ Record with **⌘⇧5**. A smaller, verified copy appears in **`~/Downloads/scre
 
 macOS launches the processor when the recording folder changes. It waits for unfinished recordings, processes them, and **exits completely when there is no work left**. There is no resident helper, periodic scan, or idle timer. This is a personal convenience tool; a missed notification or crash can require a manual rerun.
 
+A small **film icon in the menu bar appears while work is pending**. Click it to see the recording, current step, elapsed time, and actual frame progress during compression and playback verification. It disappears when processing finishes.
+
 To rebuild this tool with an agent, use the [rebuild prompt](PROMPT.md).
 
 ## One-click install
@@ -11,7 +13,7 @@ To rebuild this tool with an agent, use the [rebuild prompt](PROMPT.md).
 1. [Download this repository as a ZIP](https://github.com/Drew-Goddyn/tools/archive/refs/heads/main.zip) and extract it, or clone it.
 2. Open this folder and **double-click `Install.command`**. Keep the folder together.
 
-The installer sets up Homebrew, Python 3.11+, and FFmpeg if needed, then installs one login job for your macOS account. Homebrew may ask for your password or Apple's Command Line Tools; its [current system requirements](https://docs.brew.sh/Installation) apply. Run as your normal user, without `sudo`. No Swift build is needed. Apple Silicon has been tested; the installer also recognizes Intel Homebrew paths.
+The installer sets up Homebrew, Python 3.11+, and FFmpeg if needed, then installs one login job for your macOS account. Homebrew may ask for your password or Apple's Command Line Tools; its [current system requirements](https://docs.brew.sh/Installation) apply. It compiles the small menu-bar display with the Swift compiler from Apple's Command Line Tools before changing an existing service. Run as your normal user, without `sudo`. Apple Silicon has been tested; the installer also recognizes Intel Homebrew paths.
 
 **Allow macOS's Desktop and Downloads folder prompts for Python when they appear.** The first save may wait for that permission. The installer does not grant itself privacy permissions or configure Full Disk Access.
 
@@ -48,6 +50,15 @@ Files arriving during encoding are collected before exit. Duplicate notification
 This tradeoff keeps the current folders and a fully exiting processor. A persistent listener or an inbox that empties after processing would provide stronger automatic recovery, at the cost of a different workflow. They are deliberately outside this version. See [Apple's launchd guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) and the local `man launchd.plist` for the native trigger behavior.
 
 ## Status and recovery
+
+**Usually, just click the film icon in the menu bar.** It shows:
+
+- The current recording and step: waiting for the recording to finish, inspecting, compressing, verifying, or saving.
+- A percentage and frame count during compression and playback verification. The percentage belongs to that step; validation follows compression.
+- Time spent in the step and when the frame count last advanced. If frames stop advancing for a minute, it says so without claiming the process is definitely stuck. Inspection and copying have no percentage because those operations do not report frame progress.
+- **Open finished recordings**, which opens the configured output folder.
+
+The display takes no keyboard focus, opens no window, and adds no Dock icon. It starts only for known work, receives updates through a pipe, and exits when the processor closes that pipe or dies. It does not watch folders or run an idle schedule. One delivery thread waits on pipe events while the display is active, retaining the newest snapshot if the display is slow. A failed display does not block processing. Set `"show_progress": false` in the installed `config.json` to disable it for subsequent runs.
 
 Read processing history and the most recent run:
 
@@ -91,6 +102,8 @@ For a pause across logins, move that plist outside `~/Library/LaunchAgents` afte
 
 `Install.command` waits for an active encode, takes the existing history lock, backs up the installed programs and launch configuration, and replaces them. A previous resident listener is removed. The new job starts after the lock is released. Folder settings and the latest processing history are preserved.
 
+The menu display is built before cutover. A compiler failure leaves the current service running. Rollback restores the previous display, or removes it when rolling back to a version that did not have one.
+
 Setup checks that the processor starts or finishes successfully. If activation fails after replacement, it restores the prior service. Interrupted upgrades can resume from the same package. Keep this package to run these management commands:
 
 ```sh
@@ -106,11 +119,16 @@ Backups and upgrade progress live in the installed `backups/` and `upgrade.json`
 ## Development and verification
 
 ```sh
-python3 -m unittest -v test_cleaner test_install test_upgrade test_setup
+python3 -m unittest -v test_progress test_cleaner test_install test_upgrade test_setup
+python3 -m unittest -v test_progress_native
 python3 -m unittest -v test_lifecycle
 python3 verify_idle.py --output /tmp/recording-cleaner-idle.json
 ```
 
-The first suite tests encoding, quality, history, publication, and installation; launchctl and preference commands are doubled in installer tests. The lifecycle suite creates a temporary real macOS launch job and generated movies under `/private/tmp`, then unloads it. It checks actual creation/copy/rename triggers, slow writes, overlapping arrivals, completion, and recovery after a stopped or crashed run. A command sandbox may require normal macOS service access for these tests.
+The first suite tests encoding, quality, history, publication, installation, actual FFmpeg progress, and broken or backpressured display pipes; launchctl and preference commands are doubled in installer tests. A paced generated clip proves intermediate frame advances without depending on a large fixture. The lifecycle suite creates a temporary real macOS launch job and generated movies under `/private/tmp`, then unloads it. It checks actual creation/copy/rename triggers, slow writes, overlapping arrivals, completion, and recovery after a stopped or crashed run. A command sandbox may require normal macOS service access for these tests.
 
-The idle observer is manually invoked and never installed as a service. It requires five quiet minutes with no job PID, launches, scans, waits, or status/log changes. It fails if recording activity occurs during that window. These checks demonstrate the tested cases; they do not turn `WatchPaths` into guaranteed delivery.
+Build the display with `python3 build_progress.py`. The opt-in native display tests briefly show a test menu item, check normal exit on pipe closure, and kill an isolated parent to check crash cleanup. They do not click or visually inspect the menu. For desktop verification, check the menu during real processing, including the change from compression to verification. The display uses [Apple's native status-item API](https://developer.apple.com/documentation/appkit/nsstatusitem) and [FFmpeg's documented progress output](https://ffmpeg.org/ffmpeg.html). It receives full snapshots with the time frames actually advanced, so delayed display updates do not pretend a frame just advanced.
+
+The idle observer is manually invoked and never installed as a service. It requires five quiet minutes with no job PID, display or worker-group processes, launches, scans, waits, or status/log changes. It fails if recording activity occurs during that window. These checks demonstrate the tested cases; they do not turn `WatchPaths` into guaranteed delivery.
+
+A folder notification can arrive just after a run exits and cause one more no-work run. Let notifications from the last recording or deletion finish before observing idle; this is distinct from a recurring check.

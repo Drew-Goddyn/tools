@@ -65,6 +65,8 @@ class UpgradeTests(unittest.TestCase):
 
     def test_upgrade_preserves_history_and_rollback_keeps_new_progress(self):
         self.run_upgrade()
+        self.assertTrue((self.support / 'progress.py').is_file())
+        self.assertTrue((self.support / upgrade.UI_BINARY).stat().st_mode & 0o100)
         self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
         agent = plistlib.loads(self.agent.read_bytes())
         self.assertNotIn('StartInterval', agent)
@@ -80,6 +82,8 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(json.loads(self.ledger.read_text()), latest)
         self.assertEqual(self.agent.read_bytes(), self.original_agent)
         self.assertEqual((self.support / 'cleaner.py').read_text(), 'old worker')
+        self.assertFalse((self.support / 'progress.py').exists())
+        self.assertFalse((self.support / upgrade.PROGRESS_APP).exists())
         self.assertFalse((self.support / 'recording-listener').exists())
         self.assertTrue(self.loaded)
 
@@ -90,6 +94,15 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(self.agent.read_bytes(), self.original_agent)
         self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
         self.assertTrue(self.loaded)
+
+    def test_ui_build_failure_leaves_active_installation_untouched(self):
+        original = {path: path.read_bytes() for path in self.support.rglob('*') if path.is_file()}
+        with patch.object(upgrade, 'build_progress', side_effect=RuntimeError('Swift build failed')):
+            with self.assertRaisesRegex(RuntimeError, 'Swift build failed'):
+                self.run_upgrade()
+        self.assertEqual(self.calls, [])
+        self.assertTrue(self.loaded)
+        self.assertEqual({path: path.read_bytes() for path in self.support.rglob('*') if path.is_file()}, original)
 
     def test_resident_listener_is_removed_and_can_be_restored(self):
         listener = self.support / 'recording-listener'

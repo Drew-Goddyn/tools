@@ -10,12 +10,15 @@ import subprocess
 import tempfile
 import time
 from cleaner import save
-from install import service_definition
+from install import RUNTIME_FILES, service_definition
+from build_progress import build_progress
+from progress import PROGRESS_APP, UI_BINARY, UI_PLIST
 
-FILES = ('cleaner.py', 'README.md', 'recording-listener', 'installation.json')
+FILES = (*RUNTIME_FILES, UI_BINARY, UI_PLIST, 'recording-listener', 'installation.json')
 
 
 def atomic_copy(source, target):
+    target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as f:
         temporary = Path(f.name)
         with source.open('rb') as src:
@@ -64,6 +67,14 @@ def restore(support, agent, journal):
         prior = backup / name
         if prior.exists():
             atomic_copy(prior, target)
+        elif name in ('progress.py', UI_BINARY, UI_PLIST):
+            target.unlink(missing_ok=True)
+    if not (backup / PROGRESS_APP).exists():
+        for path in ((support / UI_BINARY).parent, (support / UI_PLIST).parent, support / PROGRESS_APP):
+            try:
+                path.rmdir()
+            except OSError:
+                pass  # Leave any unrelated additional files alone.
     atomic_copy(backup / 'launch-agent.plist', agent)
     journal['phase'] = 'rolled_back'
     save(support / 'upgrade.json', journal)
@@ -74,8 +85,10 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
     support, agent = locations(user_home)
     bundle = Path(__file__).resolve().parent
     check_installation(support)
+    progress_binary = build_progress(bundle)
     candidate = {name: hashlib.sha256((bundle / name).read_bytes()).hexdigest()
-                 for name in ('cleaner.py', 'README.md', 'install.py')}
+                 for name in (*RUNTIME_FILES, 'install.py', 'build_progress.py', 'ProgressMenu.swift', 'ProgressInfo.plist')}
+    candidate['RecordingProgress'] = hashlib.sha256(progress_binary.read_bytes()).hexdigest()
     journal_path = support / 'upgrade.json'
     with (support / 'install.lock').open('a') as installation_lock:
         fcntl.flock(installation_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -104,6 +117,7 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
                     backup.mkdir(parents=True, exist_ok=True)
                     for name in FILES:
                         if (support / name).exists():
+                            (backup / name).parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(support / name, backup / name)
                     shutil.copy2(agent, backup / 'launch-agent.plist')
                     shutil.copy2(support / 'config.json', backup / 'config.json')
@@ -114,8 +128,10 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
                 rollback_needed = True
                 journal['phase'] = 'stopped'
                 save(journal_path, journal)
-                for name in ('cleaner.py', 'README.md'):
+                for name in RUNTIME_FILES:
                     atomic_copy(bundle / name, support / name)
+                atomic_copy(progress_binary, support / UI_BINARY)
+                atomic_copy(bundle / 'ProgressInfo.plist', support / UI_PLIST)
                 (support / 'recording-listener').unlink(missing_ok=True)
                 with tempfile.NamedTemporaryFile(dir=agent.parent, delete=False) as f:
                     plistlib.dump(service_definition(support, support / 'config.json'), f)

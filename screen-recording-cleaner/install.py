@@ -9,6 +9,10 @@ import shutil
 import subprocess
 import sys
 from cleaner import save
+from build_progress import build_progress
+from progress import UI_BINARY, UI_PLIST
+
+RUNTIME_FILES = ('cleaner.py', 'progress.py', 'README.md')
 
 
 def service_definition(support, config_path):
@@ -59,6 +63,7 @@ def install(user_home=Path.home(), command=subprocess.run):
         raise RuntimeError("Existing unrecognized support directory; refusing to alter it")
     if agent.exists() and not marker.exists():
         raise RuntimeError("Existing unrecognized launch agent; refusing to alter it")
+    progress_binary = build_progress(bundle)
     source.mkdir(parents=True, exist_ok=True)
     support.mkdir(parents=True, mode=0o700, exist_ok=True)
     with (support / "install.lock").open("a") as lock:
@@ -70,8 +75,12 @@ def install(user_home=Path.home(), command=subprocess.run):
             raise RuntimeError("Already installed; use status or the documented resume command")
         save(marker, journal)
         output.mkdir(parents=True, exist_ok=True)
-        put_once(support / "cleaner.py", (bundle / "cleaner.py").read_bytes())
-        put_once(support / "README.md", (bundle / "README.md").read_bytes())
+        for name in RUNTIME_FILES:
+            put_once(support / name, (bundle / name).read_bytes())
+        (support / UI_BINARY).parent.mkdir(parents=True, exist_ok=True)
+        put_once(support / UI_BINARY, progress_binary.read_bytes())
+        (support / UI_BINARY).chmod(0o700)
+        put_once(support / UI_PLIST, (bundle / 'ProgressInfo.plist').read_bytes())
         config = {"source": str(source), "output": str(output), "state_dir": str(support / "state"),
                   "python": str(python), "ffmpeg": ffmpeg, "ffprobe": ffprobe,
                   "threads": 4, "crf": 18, "max_bytes": 20000000, "settle_seconds": 30,

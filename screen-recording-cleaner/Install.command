@@ -46,4 +46,5 @@ fi
 printf '\nInstalled. Record with Command-Shift-5 as usual. Clean copies arrive in Downloads/screen-recordings.\n'
 printf 'Allow the macOS Desktop/Downloads folder prompts for the helper when they appear.\n'
 printf 'The first copy waits for 30 seconds of stability, then any encoding and validation time.\n'
+printf 'While work is pending, click the film icon in the menu bar for progress and the finished-recordings folder.\n'
 printf 'The processor exits completely when no unfinished recordings or retries remain.\n'
