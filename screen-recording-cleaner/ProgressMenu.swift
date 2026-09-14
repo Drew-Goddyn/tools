@@ -14,7 +14,7 @@ struct Update: Decodable {
 }
 
 final class ProgressMenu: NSObject, NSMenuDelegate {
-    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private let item: NSStatusItem
     private let menu = NSMenu()
     private let fileRow = NSMenuItem()
     private let phaseRow = NSMenuItem()
@@ -31,6 +31,11 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
 
     init(output: URL) {
         self.output = output
+        // AppKit's autosaved position preference is undocumented. Register only
+        // an initial default near the clock; a user's saved position wins.
+        UserDefaults.standard.register(defaults: ["NSStatusItem Preferred Position RecordingProgress": 0])
+        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.autosaveName = "RecordingProgress"
         super.init()
         menu.autoenablesItems = false
         menu.delegate = self
@@ -45,9 +50,7 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
         item.menu = menu
         if let button = item.button {
             button.image = NSImage(systemSymbolName: "film", accessibilityDescription: "Screen recording cleaner")
-            button.imagePosition = .imageLeading
-            button.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-            button.title = " …"
+            button.imagePosition = .imageOnly
         }
     }
 
@@ -107,9 +110,6 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
                 ? "No output frames for \(elapsed(phaseStarted))"
                 : "Waiting for the first frame"
         }
-        let title = update.percent.map { " \($0)%" }
-            ?? (update.phase.hasPrefix("Waiting") || update.phase == "Compressing" ? " …" : " Check")
-        item.button?.title = title
         item.button?.toolTip = "\(update.filename)\n\(phaseRow.title)"
     }
 
@@ -131,7 +131,7 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
     func finish() {
         staleCheck?.cancel()
         menuClock?.invalidate()
-        NSStatusBar.system.removeStatusItem(item)
+        // Termination removes the item. Explicit removal clears its saved position.
         NSApplication.shared.terminate(nil)
     }
 }

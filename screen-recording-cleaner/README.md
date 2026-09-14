@@ -6,6 +6,8 @@ macOS launches the processor when the recording folder changes. It waits for unf
 
 A small **film icon in the menu bar appears while work is pending**. Click it to see the recording, current step, elapsed time, and actual frame progress during compression and playback verification. It disappears when processing finishes.
 
+The icon starts near the clock, with progress percentages inside the menu so it stays compact. While it is visible, hold **⌘ and drag** to move it; macOS remembers the position for the next recording. This avoids placing a new, wide indicator behind the camera notch on a crowded menu bar.
+
 To rebuild this tool with an agent, use the [rebuild prompt](PROMPT.md).
 
 ## One-click install
@@ -128,6 +130,8 @@ python3 verify_idle.py --output /tmp/recording-cleaner-idle.json
 The first suite tests encoding, quality, history, publication, installation, actual FFmpeg progress, and broken or backpressured display pipes; launchctl and preference commands are doubled in installer tests. A paced generated clip proves intermediate frame advances without depending on a large fixture. The lifecycle suite creates a temporary real macOS launch job and generated movies under `/private/tmp`, then unloads it. It checks actual creation/copy/rename triggers, slow writes, overlapping arrivals, completion, and recovery after a stopped or crashed run. A command sandbox may require normal macOS service access for these tests.
 
 Build the display with `python3 build_progress.py`. The opt-in native display tests briefly show a test menu item, check normal exit on pipe closure, and kill an isolated parent to check crash cleanup. They do not click or visually inspect the menu. For desktop verification, check the menu during real processing, including the change from compression to verification. The display uses [Apple's native status-item API](https://developer.apple.com/documentation/appkit/nsstatusitem) and [FFmpeg's documented progress output](https://ffmpeg.org/ffmpeg.html). It receives full snapshots with the time frames actually advanced, so delayed display updates do not pretend a frame just advanced.
+
+Placement uses a stable AppKit autosave name and registers an initial default for AppKit's undocumented `NSStatusItem Preferred Position` preference. An existing saved position takes precedence. The app exits without explicitly removing the item, which would clear the saved position. Check actual placement on the target Mac: AppKit can report `isVisible` as true even when an item is hidden behind the notch.
 
 The idle observer is manually invoked and never installed as a service. It requires five quiet minutes with no job PID, display or worker-group processes, launches, scans, waits, or status/log changes. It fails if recording activity occurs during that window. These checks demonstrate the tested cases; they do not turn `WatchPaths` into guaranteed delivery.
 
