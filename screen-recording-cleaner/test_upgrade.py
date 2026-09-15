@@ -30,7 +30,8 @@ class UpgradeTests(unittest.TestCase):
             'installer': 'local.screen-recording-cleaner.v1', 'phase': 'active'}))
         (self.support / 'cleaner.py').write_text('old worker')
         (self.support / 'README.md').write_text('old documentation')
-        self.config = {'source': str(self.home / 'recordings'), 'unchanged': True}
+        self.config = {'source': str(self.home / 'recordings'), 'output': str(self.home / 'output'), 'unchanged': True}
+        Path(self.config['output']).mkdir()
         (self.support / 'config.json').write_text(json.dumps(self.config))
         self.agent.write_bytes(plistlib.dumps({'Label': 'local.screen-recording-cleaner', 'StartInterval': 15}))
         self.original_ledger = self.ledger.read_bytes()
@@ -65,6 +66,8 @@ class UpgradeTests(unittest.TestCase):
 
     def test_upgrade_preserves_history_and_rollback_keeps_new_progress(self):
         self.run_upgrade()
+        shortcut = Path(self.config['output']) / 'Resume Screen Recording Cleaner.command'
+        self.assertTrue(shortcut.is_symlink())
         self.assertTrue((self.support / 'progress.py').is_file())
         self.assertTrue((self.support / upgrade.UI_BINARY).stat().st_mode & 0o100)
         self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
@@ -85,7 +88,36 @@ class UpgradeTests(unittest.TestCase):
         self.assertFalse((self.support / 'progress.py').exists())
         self.assertFalse((self.support / upgrade.PROGRESS_APP).exists())
         self.assertFalse((self.support / 'recording-listener').exists())
+        self.assertFalse(shortcut.is_symlink())
+        self.assertFalse((self.support / 'Resume.command').exists())
         self.assertTrue(self.loaded)
+
+    def test_paused_upgrade_leaves_programs_and_history_untouched(self):
+        original = {path: path.read_bytes() for path in self.support.rglob('*') if path.is_file()}
+        for state in ('true', 'disabled'):
+            with self.subTest(state=state):
+                def paused(args, **kwargs):
+                    self.assertEqual(args[1], 'print-disabled')
+                    return subprocess.CompletedProcess(args, 0, stdout=f'"local.screen-recording-cleaner" => {state}')
+                with self.assertRaisesRegex(RuntimeError, 'cleaner is paused'):
+                    upgrade.upgrade(self.home, paused)
+                self.assertEqual(self.agent.read_bytes(), self.original_agent)
+                self.assertEqual({path: path.read_bytes() for path in self.support.rglob('*') if path.is_file()}, original)
+
+    def test_paused_rollback_keeps_the_resume_shortcut_and_installed_files(self):
+        self.run_upgrade()
+        original = {path: path.read_bytes() for path in self.support.rglob('*') if path.is_file()}
+        shortcut = Path(self.config['output']) / 'Resume Screen Recording Cleaner.command'
+        agent = self.agent.read_bytes()
+        def paused(args, **kwargs):
+            self.assertEqual(args[1], 'print-disabled')
+            return subprocess.CompletedProcess(args, 0, stdout='"local.screen-recording-cleaner" => disabled')
+        with self.assertRaisesRegex(RuntimeError, 'cleaner is paused'):
+            upgrade.rollback(self.home, paused)
+        self.assertEqual(self.agent.read_bytes(), agent)
+        self.assertTrue(shortcut.is_symlink())
+        self.assertTrue(shortcut.resolve().is_file())
+        self.assertEqual({path: path.read_bytes() for path in self.support.rglob('*') if path.is_file()}, original)
 
     def test_activation_failure_restores_old_service(self):
         self.fail_start = True
@@ -155,7 +187,7 @@ class UpgradeTests(unittest.TestCase):
             thread.start()
             time.sleep(.3)
             self.assertTrue(thread.is_alive())
-            self.assertEqual(self.calls, [])
+            self.assertEqual(self.calls, ['print-disabled'])
             self.assertEqual(self.agent.read_bytes(), self.original_agent)
             holder.stdin.close()
             holder.wait(timeout=5)

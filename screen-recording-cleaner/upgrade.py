@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 from cleaner import save
-from install import RUNTIME_FILES, service_definition
+from install import RUNTIME_FILES, require_resumed, resume_shortcut, service_definition
 from build_progress import build_progress
 from progress import PROGRESS_APP, UI_BINARY, UI_PLIST
 
@@ -67,8 +67,13 @@ def restore(support, agent, journal):
         prior = backup / name
         if prior.exists():
             atomic_copy(prior, target)
-        elif name in ('progress.py', UI_BINARY, UI_PLIST):
+        elif name in ('progress.py', 'Resume.command', UI_BINARY, UI_PLIST):
             target.unlink(missing_ok=True)
+    if not (backup / 'Resume.command').exists():
+        config = json.loads((support / 'config.json').read_text())
+        for shortcut in Path(config['output']).glob('Resume Screen Recording Cleaner*.command'):
+            if shortcut.is_symlink() and shortcut.readlink() == support / 'Resume.command':
+                shortcut.unlink()
     if not (backup / PROGRESS_APP).exists():
         for path in ((support / UI_BINARY).parent, (support / UI_PLIST).parent, support / PROGRESS_APP):
             try:
@@ -86,6 +91,7 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
     bundle = Path(__file__).resolve().parent
     check_installation(support)
     progress_binary = build_progress(bundle)
+    require_resumed(command)
     candidate = {name: hashlib.sha256((bundle / name).read_bytes()).hexdigest()
                  for name in (*RUNTIME_FILES, 'install.py', 'build_progress.py', 'ProgressMenu.swift', 'ProgressInfo.plist')}
     candidate['RecordingProgress'] = hashlib.sha256(progress_binary.read_bytes()).hexdigest()
@@ -111,6 +117,7 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
             # Blocks only for an active recording, then excludes both old and new workers.
             with (support / 'state/lock').open('a') as worker_lock:
                 fcntl.flock(worker_lock, fcntl.LOCK_EX)
+                require_resumed(command)  # The user may have paused while we waited.
                 check_installation(support)
                 backup = Path(journal['backup'])
                 if journal['phase'] == 'preparing':
@@ -130,6 +137,7 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
                 save(journal_path, journal)
                 for name in RUNTIME_FILES:
                     atomic_copy(bundle / name, support / name)
+                resume_shortcut(support, Path(json.loads((support / 'config.json').read_text())['output']))
                 atomic_copy(progress_binary, support / UI_BINARY)
                 atomic_copy(bundle / 'ProgressInfo.plist', support / UI_PLIST)
                 (support / 'recording-listener').unlink(missing_ok=True)
@@ -159,12 +167,14 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
 def rollback(user_home=Path.home(), command=subprocess.run):
     support, agent = locations(user_home)
     check_installation(support)
+    require_resumed(command)
     with (support / 'install.lock').open('a') as installation_lock:
         fcntl.flock(installation_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         journal = json.loads((support / 'upgrade.json').read_text())
         if journal['phase'] != 'rolled_back':
             with (support / 'state/lock').open('a') as worker_lock:
                 fcntl.flock(worker_lock, fcntl.LOCK_EX)
+                require_resumed(command)
                 stop(command)
                 restore(support, agent, journal)
         start(command, agent)

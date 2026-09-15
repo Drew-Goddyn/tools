@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from cleaner import save
 from build_progress import build_progress
 from progress import UI_BINARY, UI_PLIST
 
-RUNTIME_FILES = ('cleaner.py', 'progress.py', 'README.md')
+RUNTIME_FILES = ('cleaner.py', 'progress.py', 'Resume.command', 'README.md')
 
 
 def service_definition(support, config_path):
@@ -21,11 +22,39 @@ def service_definition(support, config_path):
     if not python or not Path(python).is_absolute():
         raise RuntimeError('An absolute Python path is required')
     return {"Label": "local.screen-recording-cleaner",
-            "ProgramArguments": [python, str(support / 'cleaner.py'), '--config', str(config_path), 'drain'],
+            "ProgramArguments": [python, str(support / 'cleaner.py'), '--config', str(config_path),
+                                 '--launchd-target', f'gui/{os.getuid()}/local.screen-recording-cleaner', 'drain'],
             "WatchPaths": [config['source']], "RunAtLoad": True, "ThrottleInterval": 30,
             "ProcessType": "Background", "LowPriorityIO": True, "Umask": 63,
             "StandardOutPath": str(support / "launchd.log"),
             "StandardErrorPath": str(support / "launchd.log")}
+
+
+def require_resumed(command):
+    result = command(['/bin/launchctl', 'print-disabled', f'gui/{os.getuid()}'],
+                     capture_output=True, text=True, check=True)
+    text = result.stdout or ''
+    if isinstance(text, bytes):
+        text = text.decode()
+    if re.search(r'"local\.screen-recording-cleaner"\s*=>\s*(?:true|disabled)\b', text):
+        raise RuntimeError('The cleaner is paused. Double-click its Resume shortcut before installing, upgrading, or rolling back.')
+
+
+def resume_shortcut(support, output):
+    target = support / 'Resume.command'
+    target.chmod(0o700)
+    output.mkdir(parents=True, exist_ok=True)
+    number = 1
+    while True:
+        suffix = '' if number == 1 else f' ({number})'
+        path = output / f'Resume Screen Recording Cleaner{suffix}.command'
+        if path.is_symlink() and path.readlink() == target:
+            return path
+        try:
+            path.symlink_to(target)
+            return path
+        except FileExistsError:
+            number += 1
 
 
 def put_once(path, content):
@@ -64,6 +93,7 @@ def install(user_home=Path.home(), command=subprocess.run):
     if agent.exists() and not marker.exists():
         raise RuntimeError("Existing unrecognized launch agent; refusing to alter it")
     progress_binary = build_progress(bundle)
+    require_resumed(command)
     source.mkdir(parents=True, exist_ok=True)
     support.mkdir(parents=True, mode=0o700, exist_ok=True)
     with (support / "install.lock").open("a") as lock:
@@ -77,6 +107,7 @@ def install(user_home=Path.home(), command=subprocess.run):
         output.mkdir(parents=True, exist_ok=True)
         for name in RUNTIME_FILES:
             put_once(support / name, (bundle / name).read_bytes())
+        resume_shortcut(support, output)
         (support / UI_BINARY).parent.mkdir(parents=True, exist_ok=True)
         put_once(support / UI_BINARY, progress_binary.read_bytes())
         (support / UI_BINARY).chmod(0o700)

@@ -6,10 +6,28 @@ import subprocess
 import tempfile
 import unittest
 
-from install import install
+from install import install, resume_shortcut
 
 
 class InstallationTests(unittest.TestCase):
+    def test_resume_shortcut_preserves_collisions_and_is_reused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            support = root / 'support'
+            support.mkdir()
+            script = support / 'Resume.command'
+            script.write_text('#!/bin/bash\n')
+            output = root / 'finished'
+            output.mkdir()
+            collision = output / 'Resume Screen Recording Cleaner.command'
+            collision.write_text('Unrelated user file')
+            shortcut = resume_shortcut(support, output)
+            self.assertEqual(collision.read_text(), 'Unrelated user file')
+            self.assertEqual(shortcut.readlink(), script)
+            self.assertTrue(script.stat().st_mode & 0o100)
+            self.assertEqual(resume_shortcut(support, output), shortcut)
+            self.assertEqual(len(list(output.iterdir())), 2)
+
     def test_registration_failure_resumes_without_resetting_queue(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

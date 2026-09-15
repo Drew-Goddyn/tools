@@ -34,6 +34,9 @@ class NativeProgressTests(unittest.TestCase):
     def test_native_display_exits_normally_on_eof(self):
         progress = Progress({'output': str(self.root)}, executable=self.executable)
         try:
+            progress.show('Counting original frames', filename='Desktop lifecycle check.mov', step=1, total_steps=5)
+            time.sleep(.5)
+            self.assertIsNone(progress.child.poll(), 'Native UI could not read the step number')
             progress.show('Compressing', filename='Desktop lifecycle check.mov', total_frames=100)
             progress.advance({'frame': '25'})
             child = progress.child

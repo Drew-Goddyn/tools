@@ -16,10 +16,11 @@ UI_PLIST = PROGRESS_APP + '/Contents/Info.plist'
 
 
 class Progress:
-    def __init__(self, config, executable=None):
+    def __init__(self, config, executable=None, launchd_target=None):
         self.executable = Path(executable or Path(__file__).parent / UI_BINARY)
         self.enabled = config.get('show_progress', True) and self.executable.is_file()
         self.output = config['output']
+        self.launchd_target = launchd_target
         self.child = None
         self.message = {}
         self.writer = None
@@ -28,10 +29,12 @@ class Progress:
         self.lock = threading.Lock()
         self.wake_read = self.wake_write = None
 
-    def show(self, phase, filename=None, total_frames=None, duration=None):
+    def show(self, phase, filename=None, total_frames=None, duration=None,
+             step=None, total_steps=None):
         message = {'version': 1, 'phase': phase,
                    'filename': filename if filename is not None else self.message.get('filename', ''),
-                   'total_frames': total_frames, 'duration': duration}
+                   'total_frames': total_frames, 'duration': duration,
+                   'step': step, 'total_steps': total_steps}
         if all(self.message.get(key) == value for key, value in message.items()):
             return
         message.update(phase_started_at=time.time(), updated_at=time.time())
@@ -65,7 +68,10 @@ class Progress:
             return
         try:
             if self.child is None:
-                self.child = subprocess.Popen([str(self.executable), self.output], stdin=subprocess.PIPE,
+                args = [str(self.executable), self.output]
+                if self.launchd_target:
+                    args.append(self.launchd_target)
+                self.child = subprocess.Popen(args, stdin=subprocess.PIPE,
                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 os.set_blocking(self.child.stdin.fileno(), False)
                 self.wake_read, self.wake_write = os.pipe()

@@ -57,6 +57,8 @@ class LifecycleTests(unittest.TestCase):
         self.target = f'gui/{os.getuid()}/{self.label}'
         definition = service_definition(self.support, self.config_path)
         definition.update(Label=self.label, ThrottleInterval=1)
+        args = definition['ProgramArguments']
+        args[args.index('--launchd-target') + 1] = self.target
         self.plist = self.root / 'job.plist'
         self.plist.write_bytes(plistlib.dumps(definition))
         self.boot()

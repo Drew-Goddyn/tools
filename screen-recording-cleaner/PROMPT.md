@@ -8,7 +8,7 @@ Use macOS's native launch-on-demand folder triggers. When a recording appears, w
 
 Treat 20 MB (20,000,000 bytes) as a soft target. Make one high-quality encode, preserving resolution, frame timing, and audio. Keep a useful size reduction even above the target; skip extra encoding passes just to cross that threshold. Files already below it can be copied unchanged; if encoding increases size, copy the original. Verify decoding, dimensions, duration, frame counts, and audio before publishing atomically. Leave originals untouched and never overwrite another file.
 
-Show quiet menu-bar feedback only while work is pending: the recording, current step, real frame progress where available, and when frames last advanced. Include a way to open finished recordings. Keep the display out of the way and ensure it exits with the processor; a failed display must not block processing.
+Show a compact menu-bar item only while work is pending: the recording, current stage with a step number and total, elapsed time, real frame progress where available, and when frames last advanced. Keep longer stage explanations in the README. Include actions to open finished recordings and pause the whole batch until explicitly resumed. Pausing must stop processing and leave no tool-owned processes running. Provide a one-click resume shortcut that collects unfinished and missed recordings. A failed display must not block processing.
 
 Process only new `.mov` and `.mp4` files directly in the recording folder; ignore screenshots and nested content. Exclude recordings already present at first setup, remember completed files, and preserve that history across reruns and upgrades.
 

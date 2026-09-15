@@ -126,10 +126,10 @@ class Cleaner:
         else:
             args += ["-c:a", "aac", "-b:a", "192k"]
         args += ["-movflags", "+faststart", str(target)]
-        self.show_progress('Compressing', info=info)
+        self.show_progress('Compressing', step=2, info=info)
         run_ffmpeg(self.ffmpeg(source, args), self.progress)
 
-    def show_progress(self, phase, filename=None, info=None):
+    def show_progress(self, phase, step, filename=None, info=None):
         if self.progress is not None:
             frames = None
             if info is not None:
@@ -137,10 +137,11 @@ class Cleaner:
                 count = str(video.get('nb_read_frames', ''))
                 frames = int(count) if count.isdigit() and int(count) > 0 else None
             self.progress.show(phase, filename=filename, total_frames=frames,
-                               duration=float(info['format']['duration']) if info is not None else None)
+                               duration=float(info['format']['duration']) if info is not None else None,
+                               step=step, total_steps=5)
 
     def validate(self, source_info, target):
-        self.show_progress('Checking frame counts')
+        self.show_progress('Checking copy', step=3)
         info = self.probe(target, count=True)
         source_v = next(s for s in source_info["streams"] if s["codec_type"] == "video")
         target_v = next(s for s in info["streams"] if s["codec_type"] == "video")
@@ -158,14 +159,14 @@ class Cleaner:
                 raise RuntimeError("Audio verification failed: channel count changed")
             if "duration" in a and "duration" in b and abs(float(a["duration"]) - float(b["duration"])) > 0.15:
                 raise RuntimeError("Audio verification failed: track duration changed")
-        self.show_progress('Verifying playback', info=source_info)
+        self.show_progress('Checking playback', step=4, info=source_info)
         run_ffmpeg(self.ffmpeg(target, ["-map", "0:v", "-map", "0:a?", "-f", "null", os.devnull]), self.progress)
         return info
 
     def process(self, source, entry):
         before = signature(source)
         self.output.mkdir(parents=True, exist_ok=True)
-        self.show_progress('Inspecting original', filename=source.name)
+        self.show_progress('Counting original frames', step=1, filename=source.name)
         info = self.probe(source, count=True)
         vid = [s for s in info["streams"] if s["codec_type"] == "video"]
         if len(vid) != 1 or float(info["format"].get("duration", 0)) <= 0:
@@ -186,9 +187,9 @@ class Cleaner:
             selected = work / ("recording" + source.suffix)
             decision = "already_small" if before[2] < self.c["max_bytes"] else "original_format_preserved"
             if before[2] < self.c["max_bytes"] or not supported:
-                self.show_progress('Copying original')
+                self.show_progress('Copying unchanged', step=2)
                 shutil.copyfile(source, selected)
-                self.show_progress('Checking copy')
+                self.show_progress('Checking copy', step=3)
                 if digest(source) != digest(selected):
                     raise RuntimeError("Original copy verification failed")
                 self.validate(info, selected)
@@ -198,13 +199,13 @@ class Cleaner:
                 self.validate(info, selected)
                 decision = "quality_encode"
                 if selected.stat().st_size >= before[2]:
-                    self.show_progress('Keeping the smaller original')
+                    self.show_progress('Saving smaller original', step=5)
                     selected = work / ("original" + source.suffix)
                     shutil.copyfile(source, selected)
                     if digest(source) != digest(selected):
                         raise RuntimeError("Original copy verification failed")
                     decision = "original_smaller"
-            self.show_progress('Saving finished copy')
+            self.show_progress('Saving smaller original' if decision == 'original_smaller' else 'Saving finished copy', step=5)
             if signature(source) != before:
                 raise RuntimeError("Recording changed during processing; waiting for the completed file")
             checksum = digest(selected)
@@ -313,7 +314,7 @@ class Cleaner:
         return {"version": 1, "pending": pending, "error": None}
 
 
-def drain(config):
+def drain(config, launchd_target=None):
     """Run on demand, waiting only while known recordings or retries remain."""
     state_dir = Path(config['state_dir'])
     status_path = state_dir / 'runner.json'
@@ -328,7 +329,7 @@ def drain(config):
         save(status_path, status)
 
     transition('processing')
-    progress = Progress(config)
+    progress = Progress(config, launchd_target=launchd_target)
     watcher = select.kqueue()
     folder_fd = None
     try:
@@ -389,6 +390,7 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--launchd-target", help=argparse.SUPPRESS)
     parser.add_argument("--supervised", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("action", choices=("init", "scan", "drain", "status"))
     args = parser.parse_args()
@@ -404,7 +406,7 @@ def main():
         print(json.dumps(state, indent=2, ensure_ascii=False))
         return
     if args.action == 'drain':
-        drain(config)
+        drain(config, launchd_target=args.launchd_target)
         return
     try:
         cleaner = Cleaner(config)

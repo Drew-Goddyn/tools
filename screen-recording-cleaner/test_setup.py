@@ -71,7 +71,7 @@ class SetupTests(unittest.TestCase):
     def release(self):
         release = self.root / 'next release'
         release.mkdir()
-        for name in ('cleaner.py', 'progress.py', 'README.md', 'install.py', 'build_progress.py', 'ProgressMenu.swift', 'ProgressInfo.plist'):
+        for name in ('cleaner.py', 'progress.py', 'Resume.command', 'README.md', 'install.py', 'build_progress.py', 'ProgressMenu.swift', 'ProgressInfo.plist'):
             shutil.copy2(BUNDLE / name, release / name)
         # Reuse the identical, already compiled UI when only README changes.
         built = build_progress(BUNDLE)

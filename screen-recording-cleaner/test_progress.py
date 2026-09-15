@@ -100,7 +100,7 @@ class ProgressTests(unittest.TestCase):
         output = self.root / 'updates.jsonl'
         progress = Progress({'output': str(output)}, executable=self.receiver())
         try:
-            progress.show('Compressing', filename='First.mov', total_frames=100000)
+            progress.show('Compressing', filename='First.mov', total_frames=100000, step=2, total_steps=5)
             self.wait(lambda: bool(self.rows(output)), 'Receiver did not start')
             os.kill(progress.child.pid, signal.SIGSTOP)
             deadline = time.monotonic() + 3
@@ -115,6 +115,8 @@ class ProgressTests(unittest.TestCase):
             self.wait(lambda: any(row['phase'] == 'Waiting to retry' for row in self.rows(output)),
                       'Pending phase was lost after the reader resumed')
             self.assertEqual(self.rows(output)[-1]['filename'], 'Next.mov')
+            self.assertIsNone(self.rows(output)[-1]['step'])
+            self.assertIsNone(self.rows(output)[-1]['total_steps'])
         finally:
             progress.close()
 
@@ -149,9 +151,13 @@ class ProgressTests(unittest.TestCase):
         progress.show('Compressing', total_frames=100)
         progress.advance({'frame': '50'})
         self.assertEqual(progress.updates[-1]['percent'], 50)
-        progress.show('Checking frame counts')
+        progress.show('Checking copy', step=3, total_steps=5)
         self.assertNotIn('percent', progress.updates[-1])
+        self.assertNotIn('frame', progress.updates[-1])
+        self.assertEqual(progress.updates[-1]['step'], 3)
         progress.show('Verifying playback', duration=4)
+        for key in ('step', 'total_steps'):
+            self.assertIsNone(progress.updates[-1][key], f'{key} leaked from the previous step')
         progress.advance({'frame': 'N/A', 'out_time_us': 'N/A'})
         self.assertNotIn('percent', progress.updates[-1])
         progress.advance({'frame': '0', 'out_time_us': '2000000'})
@@ -168,7 +174,7 @@ class ProgressTests(unittest.TestCase):
             run_ffmpeg([str(helper)], progress)
         self.assertEqual(progress.updates[-1]['percent'], 50)
 
-    def test_real_encode_and_verification_report_frame_advances(self):
+    def test_real_recording_reports_five_steps_and_frame_advances(self):
         source = self.root / 'recordings'
         source.mkdir()
         config = {'source': str(source), 'output': str(self.root / 'output'),
@@ -191,21 +197,66 @@ class ProgressTests(unittest.TestCase):
                 command = ffmpeg(source, args)
                 index = command.index('-i')
                 return command[:index] + ['-re'] + command[index:]
+            probe = cleaner.probe
+            def explained_probe(path, count=False):
+                # The correct step must be visible before the blocking frame count.
+                message = progress.updates[-1]
+                self.assertTrue(count)
+                self.assertEqual(message['step'], 1 if path.parent == source else 3)
+                self.assertEqual(message['total_steps'], 5)
+                self.assertNotIn('percent', message)
+                self.assertNotIn('frame', message)
+                return probe(path, count=count)
             # A tiny unpaced fixture can finish between progress reports. Pacing
             # input at playback speed proves intermediate updates without a huge fixture.
-            with patch.object(cleaner, 'ffmpeg', paced_ffmpeg):
+            with patch.object(cleaner, 'ffmpeg', paced_ffmpeg), patch.object(cleaner, 'probe', explained_probe):
                 cleaner.process(movie, entry)
             self.assertEqual(entry['status'], 'done')
             self.assertEqual(entry['decision'], 'quality_encode')
+            compressed = Path(entry['output'])
             self.assertEqual(digest(movie), original)
             phases = list(dict.fromkeys(row['phase'] for row in progress.updates))
-            self.assertEqual(phases, ['Inspecting original', 'Compressing', 'Checking frame counts',
-                                     'Verifying playback', 'Saving finished copy'])
-            for phase in ('Compressing', 'Verifying playback'):
+            self.assertEqual(phases, ['Counting original frames', 'Compressing', 'Checking copy',
+                                     'Checking playback', 'Saving finished copy'])
+            self.assertEqual(list(dict.fromkeys(row['step'] for row in progress.updates)), [1, 2, 3, 4, 5])
+            self.assertTrue(all(row['total_steps'] == 5 for row in progress.updates))
+            for phase in ('Compressing', 'Checking playback'):
                 frames = [row['frame'] for row in progress.updates if row['phase'] == phase and 'frame' in row]
                 self.assertGreater(len(set(frames)), 1, (phase, frames))
                 self.assertEqual(frames[-1], 60)
                 self.assertLess(frames[0], frames[-1])
+            # Copying is still step two; each recording starts its own five steps.
+            small = source / 'Small.mov'
+            shutil.copyfile(movie, small)
+            config['max_bytes'] = small.stat().st_size + 1
+            entry = {'signature': signature(small), 'status': 'processing'}
+            cleaner.state['files'][str(small)] = entry
+            progress.updates.clear()
+            with patch.object(cleaner, 'probe', explained_probe):
+                cleaner.process(small, entry)
+            self.assertEqual(entry['decision'], 'already_small')
+            self.assertEqual(digest(Path(entry['output'])), original)
+            self.assertEqual(digest(small), original)
+            copy = next(row for row in progress.updates if row['phase'] == 'Copying unchanged')
+            self.assertEqual(copy['step'], 2)
+            self.assertFalse(any(row['phase'] == 'Compressing' for row in progress.updates))
+            self.assertEqual(list(dict.fromkeys(row['step'] for row in progress.updates)), [1, 2, 3, 4, 5])
+
+            # A lossless re-encode of the smaller, lossy fixture is larger. Its
+            # fallback copy belongs to saving, so the step number never goes backward.
+            fallback = source / 'Fallback.mp4'
+            shutil.copyfile(compressed, fallback)
+            config.update(max_bytes=0, crf=0)
+            entry = {'signature': signature(fallback), 'status': 'processing'}
+            cleaner.state['files'][str(fallback)] = entry
+            progress.updates.clear()
+            cleaner.process(fallback, entry)
+            self.assertEqual(entry['decision'], 'original_smaller')
+            self.assertEqual(digest(Path(entry['output'])), digest(fallback))
+            self.assertEqual(digest(fallback), digest(compressed))
+            phases = list(dict.fromkeys(row['phase'] for row in progress.updates))
+            self.assertEqual(phases[-1], 'Saving smaller original')
+            self.assertEqual(list(dict.fromkeys(row['step'] for row in progress.updates)), [1, 2, 3, 4, 5])
         finally:
             cleaner.lock.close()
             for handler in cleaner.log.handlers[:]:
