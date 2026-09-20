@@ -18,6 +18,13 @@ LABEL = 'local.screen-recording-cleaner'
 PAUSED_LABEL = LABEL + '.paused-menu'
 
 
+def check_ffmpeg(ffmpeg):
+    help_text = subprocess.run([ffmpeg, '-hide_banner', '-h', 'full'],
+                              capture_output=True, text=True, check=True).stdout
+    if '-stats_enc_pre_fmt' not in help_text:
+        raise RuntimeError('FFmpeg needs decoded-frame statistics support. Run brew upgrade ffmpeg, then install again.')
+
+
 def service_definition(support, config_path):
     config = json.loads(config_path.read_text())
     python = config.get('python') or shutil.which('python3')
@@ -27,7 +34,10 @@ def service_definition(support, config_path):
             "ProgramArguments": [python, str(support / 'cleaner.py'), '--config', str(config_path),
                                  '--launchd-target', f'gui/{os.getuid()}/local.screen-recording-cleaner', 'drain'],
             "WatchPaths": [config['source']], "RunAtLoad": True, "ThrottleInterval": 30,
-            "ProcessType": "Background", "LowPriorityIO": True, "Umask": 63,
+            # Background's additional throttling made short Retina clips take
+            # minutes. Standard permits faster execution; nice and I/O priority
+            # still favor foreground work, with four encoder threads by default.
+            "ProcessType": "Standard", "Nice": 10, "LowPriorityIO": True, "Umask": 63,
             "StandardOutPath": str(support / "launchd.log"),
             "StandardErrorPath": str(support / "launchd.log")}
 
@@ -103,6 +113,7 @@ def install(user_home=Path.home(), command=subprocess.run):
     ffprobe = shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg and ffprobe are required; run Install.command to install dependencies")
+    check_ffmpeg(ffmpeg)
     source = user_home / "Desktop/screen recordings"
     output = user_home / "Downloads/screen-recordings"
     marker = support / "installation.json"
@@ -136,7 +147,7 @@ def install(user_home=Path.home(), command=subprocess.run):
         put_once(support / UI_PLIST, (bundle / 'ProgressInfo.plist').read_bytes())
         config = {"source": str(source), "output": str(output), "state_dir": str(support / "state"),
                   "python": str(python), "ffmpeg": ffmpeg, "ffprobe": ffprobe,
-                  "threads": 4, "crf": 18, "max_bytes": 20000000, "settle_seconds": 30,
+                  "threads": 4, "crf": 18, "preset": "fast", "max_bytes": 20000000, "settle_seconds": 30,
                   "notifications": True}
         config_path = support / "config.json"
         put_once(config_path, (json.dumps(config, indent=2) + "\n").encode())

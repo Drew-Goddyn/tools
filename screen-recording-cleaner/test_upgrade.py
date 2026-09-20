@@ -78,6 +78,16 @@ class UpgradeTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             upgrade.upgrade(self.home, self.command)
 
+    def test_old_ffmpeg_leaves_the_running_installation_and_history_untouched(self):
+        with patch('upgrade.check_ffmpeg', side_effect=RuntimeError('Upgrade FFmpeg')):
+            with self.assertRaisesRegex(RuntimeError, 'Upgrade FFmpeg'):
+                self.run_upgrade()
+        self.assertEqual(self.calls, [])
+        self.assertTrue(self.loaded)
+        self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+        self.assertEqual(self.agent.read_bytes(), self.original_agent)
+        self.assertEqual((self.support / 'cleaner.py').read_text(), 'old worker')
+
     def test_upgrade_preserves_history_and_rollback_keeps_new_progress(self):
         self.run_upgrade()
         shortcut = Path(self.config['output']) / 'Resume Screen Recording Cleaner.command'

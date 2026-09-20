@@ -252,7 +252,7 @@ class CommandTests(unittest.TestCase):
             binaries.mkdir(parents=True)
             (binaries / 'python3').symlink_to(sys.executable)
             for name in ('ffmpeg', 'ffprobe'):
-                (binaries / name).write_text('#!/bin/sh\nexit 0\n')
+                (binaries / name).write_text('#!/bin/sh\nprintf "%s\\n" "-stats_enc_pre_fmt"\n')
                 (binaries / name).chmod(0o700)
             brew = binaries / 'brew'
             brew.write_text('#!/bin/sh\n[ "$1" = --prefix ] || exit 3\nprintf "%s\\n" "$TEST_BREW_PREFIX"\n')

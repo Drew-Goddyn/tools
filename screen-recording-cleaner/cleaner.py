@@ -2,6 +2,7 @@
 """Local screen-recording queue. Originals are read-only; publication is exclusive."""
 import argparse
 import fcntl
+from fractions import Fraction
 import hashlib
 import json
 import logging
@@ -10,6 +11,7 @@ import os
 from pathlib import Path
 import select
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -42,6 +44,32 @@ def run(args, timeout=None):
     if result.returncode:
         raise RuntimeError(result.stderr[-3000:] or f"Command exited {result.returncode}")
     return result.stdout
+
+
+def frame_times(path):
+    """Read decoded-frame evidence, independently of the compressed packet count."""
+    times = []
+    for line in path.read_text().splitlines():
+        number, decoded, base, timestamp = line.split()
+        if int(number) != len(times) or int(decoded) != len(times):
+            raise RuntimeError('Video verification failed: decoded frames were skipped or repeated')
+        times.append(int(timestamp) * Fraction(base))
+    if not times:
+        raise RuntimeError('Video verification failed: no decoded frames')
+    return times
+
+
+def frame_stats(path):
+    # FFmpeg emits one record for each decoded frame submitted to the encoder.
+    # passthrough below prevents frame-rate conversion before this observation.
+    return ['-stats_enc_pre:v:0', str(path), '-stats_enc_pre_fmt:v:0', '{n} {ni} {tb} {pts}']
+
+
+def stop_processing(signum, _frame):
+    # SystemExit unwinds subprocess cleanup without recording a retry or holding
+    # encoder memory. Ignore repeated TERM while the child is killed and reaped.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise SystemExit(128 + signum)
 
 
 def videos(folder):
@@ -105,7 +133,8 @@ class Cleaner:
         self.log.info("Initialized; left %d existing recordings alone", len(entries))
 
     def probe(self, path, count=False):
-        args = [self.c["ffprobe"], "-v", "error", "-show_streams", "-show_format", "-of", "json"]
+        args = [self.c["ffprobe"], "-v", "error", "-threads", str(self.c["threads"]),
+                "-show_streams", "-show_format", "-of", "json"]
         if count:
             args += ["-count_frames"]
         info = json.loads(run(args + [str(path)]))
@@ -117,7 +146,7 @@ class Cleaner:
 
     def encode(self, source, target, info):
         audio = [s for s in info["streams"] if s["codec_type"] == "audio"]
-        args = ["-map", "0:v:0", "-c:v", "libx264", "-preset", "slow", "-threads",
+        args = ["-map", "0:v:0", "-c:v", "libx264", "-preset", self.c.get('preset', 'fast'), "-threads",
                 str(self.c["threads"]), "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
                 "-enc_time_base", "demux"]
         args += ["-crf", str(self.c["crf"]), "-map", "0:a?"]
@@ -125,27 +154,32 @@ class Cleaner:
             args += ["-c:a", "copy"]
         else:
             args += ["-c:a", "aac", "-b:a", "192k"]
-        args += ["-movflags", "+faststart", str(target)]
+        trace = target.parent / 'source-frames.txt'
+        args += frame_stats(trace) + ["-movflags", "+faststart", str(target)]
         self.show_progress('Compressing', step=2, info=info)
         run_ffmpeg(self.ffmpeg(source, args), self.progress)
+        return frame_times(trace)
 
     def show_progress(self, phase, step, filename=None, info=None):
         if self.progress is not None:
             frames = None
             if info is not None:
                 video = next(s for s in info['streams'] if s['codec_type'] == 'video')
-                count = str(video.get('nb_read_frames', ''))
+                count = str(video.get('nb_read_frames', video.get('nb_frames', '')))
                 frames = int(count) if count.isdigit() and int(count) > 0 else None
             self.progress.show(phase, filename=filename, total_frames=frames,
                                duration=float(info['format']['duration']) if info is not None else None,
                                step=step, total_steps=5)
 
-    def validate(self, source_info, target):
+    def validate(self, source_info, target, original_frames=None):
         self.show_progress('Checking copy', step=3)
-        info = self.probe(target, count=True)
+        info = self.probe(target)
         source_v = next(s for s in source_info["streams"] if s["codec_type"] == "video")
-        target_v = next(s for s in info["streams"] if s["codec_type"] == "video")
-        for field in ("width", "height", "nb_read_frames"):
+        videos = [s for s in info['streams'] if s['codec_type'] == 'video']
+        if len(videos) != 1:
+            raise RuntimeError('Video verification failed: track count changed')
+        target_v = videos[0]
+        for field in ("width", "height"):
             if source_v.get(field) != target_v.get(field):
                 raise RuntimeError(f"Video verification failed: {field} differs")
         if abs(float(source_info["format"]["duration"]) - float(info["format"]["duration"])) > 0.15:
@@ -160,14 +194,27 @@ class Cleaner:
             if "duration" in a and "duration" in b and abs(float(a["duration"]) - float(b["duration"])) > 0.15:
                 raise RuntimeError("Audio verification failed: track duration changed")
         self.show_progress('Checking playback', step=4, info=source_info)
-        run_ffmpeg(self.ffmpeg(target, ["-map", "0:v", "-map", "0:a?", "-f", "null", os.devnull]), self.progress)
+        trace = target.parent / 'verified-frames.txt'
+        args = ['-map', '0:v:0', '-map', '0:a?', '-fps_mode', 'passthrough',
+                '-enc_time_base', 'demux'] + frame_stats(trace) + ['-f', 'null', os.devnull]
+        run_ffmpeg(self.ffmpeg(target, args), self.progress)
+        decoded = frame_times(trace)
+        if original_frames is not None:
+            if len(original_frames) != len(decoded):
+                raise RuntimeError('Video verification failed: frame count differs')
+            # Containers can shift the common origin. Preserve every interval,
+            # including variable frame timing, to within one microsecond.
+            if any(abs((a - original_frames[0]) - (b - decoded[0])) > Fraction(1, 1_000_000)
+                   for a, b in zip(original_frames, decoded)):
+                raise RuntimeError('Video verification failed: frame timing changed')
+        target_v['nb_read_frames'] = str(len(decoded))
         return info
 
     def process(self, source, entry):
         before = signature(source)
         self.output.mkdir(parents=True, exist_ok=True)
-        self.show_progress('Counting original frames', step=1, filename=source.name)
-        info = self.probe(source, count=True)
+        self.show_progress('Reading recording', step=1, filename=source.name)
+        info = self.probe(source)
         vid = [s for s in info["streams"] if s["codec_type"] == "video"]
         if len(vid) != 1 or float(info["format"].get("duration", 0)) <= 0:
             raise RuntimeError("Expected one complete video track")
@@ -192,11 +239,14 @@ class Cleaner:
                 self.show_progress('Checking copy', step=3)
                 if digest(source) != digest(selected):
                     raise RuntimeError("Original copy verification failed")
+                # Identical bytes guarantee identical source/copy frames. Decode
+                # the copy once to verify the whole video and every audio track.
                 self.validate(info, selected)
             else:
                 selected = work / "quality.mp4"
-                self.encode(source, selected, info)
-                self.validate(info, selected)
+                original_frames = self.encode(source, selected, info)
+                vid[0]['nb_read_frames'] = str(len(original_frames))
+                self.validate(info, selected, original_frames)
                 decision = "quality_encode"
                 if selected.stat().st_size >= before[2]:
                     self.show_progress('Saving smaller original', step=5)
@@ -387,6 +437,7 @@ def drain(config, launchd_target=None):
 
 
 def main():
+    signal.signal(signal.SIGTERM, stop_processing)
     os.umask(0o077)
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)

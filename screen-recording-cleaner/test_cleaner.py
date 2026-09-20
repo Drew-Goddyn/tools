@@ -166,9 +166,10 @@ class QueueTests(unittest.TestCase):
         self.c.c["max_bytes"] = 150000
         original_encode = self.c.encode
         def change_after_encode(*args, **kwargs):
-            original_encode(*args, **kwargs)
+            frames = original_encode(*args, **kwargs)
             with source.open("ab") as f:
                 f.write(b"changed")
+            return frames
         self.c.encode = change_after_encode
         self.c.scan()
         self.c.scan()

@@ -5,11 +5,24 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from install import install, resume_shortcut
+from install import check_ffmpeg, install, resume_shortcut
 
 
 class InstallationTests(unittest.TestCase):
+    def test_old_ffmpeg_is_rejected_before_creating_an_installation(self):
+        result = subprocess.CompletedProcess([], 0, stdout='old ffmpeg help')
+        with patch('install.subprocess.run', return_value=result):
+            with self.assertRaisesRegex(RuntimeError, 'decoded-frame statistics'):
+                check_ffmpeg('/unused/ffmpeg')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch('install.check_ffmpeg', side_effect=RuntimeError('Upgrade FFmpeg')):
+                with self.assertRaisesRegex(RuntimeError, 'Upgrade FFmpeg'):
+                    install(root)
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_resume_shortcut_preserves_collisions_and_is_reused(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -41,11 +41,15 @@ fi
 if [[ ! -x "$brew_prefix/bin/ffmpeg" || ! -x "$brew_prefix/bin/ffprobe" ]]; then
     "$brew" install ffmpeg
 fi
+if ! "$python" -c 'import subprocess,sys; r=subprocess.run([sys.argv[1], "-hide_banner", "-h", "full"], capture_output=True, text=True, check=True); raise SystemExit("-stats_enc_pre_fmt" not in r.stdout)' "$brew_prefix/bin/ffmpeg"; then
+    "$brew" upgrade ffmpeg
+fi
 
 "$python" "$bundle/install.py" setup
 printf '\nInstalled. Record with Command-Shift-5 as usual. Clean copies arrive in Downloads/screen-recordings.\n'
 printf 'Allow the macOS Desktop/Downloads folder prompts for the helper when they appear.\n'
 printf 'The first copy waits for 30 seconds of stability, then any encoding and validation time.\n'
+printf 'Processing uses a faster quality encode and checks frame counts during encoding and playback verification.\n'
 printf 'While work is pending, click the film icon in the menu bar for progress and the finished-recordings folder.\n'
 printf 'While paused, the film icon stays visible with a Resume processing action, including after login.\n'
 printf 'Upgrades preserve a pause. When enabled and idle, the menu and processor exit completely.\n'

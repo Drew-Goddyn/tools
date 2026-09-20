@@ -187,7 +187,7 @@ class ProgressTests(unittest.TestCase):
             cleaner.initialize()
             movie = source / 'Motion.mov'
             subprocess.run([config['ffmpeg'], '-v', 'error', '-f', 'lavfi', '-i',
-                'testsrc2=size=640x360:rate=30:duration=2', '-c:v', 'libx264', '-crf', '0',
+                'testsrc2=size=640x360:rate=30:duration=6', '-c:v', 'libx264', '-crf', '0',
                 '-threads', '2', str(movie)], check=True)
             original = digest(movie)
             entry = {'signature': signature(movie), 'status': 'processing'}
@@ -199,9 +199,10 @@ class ProgressTests(unittest.TestCase):
                 return command[:index] + ['-re'] + command[index:]
             probe = cleaner.probe
             def explained_probe(path, count=False):
-                # The correct step must be visible before the blocking frame count.
+                # These are quick metadata reads. Actual frame counts are taken
+                # during compression and playback verification, not a third pass.
                 message = progress.updates[-1]
-                self.assertTrue(count)
+                self.assertFalse(count)
                 self.assertEqual(message['step'], 1 if path.parent == source else 3)
                 self.assertEqual(message['total_steps'], 5)
                 self.assertNotIn('percent', message)
@@ -216,14 +217,14 @@ class ProgressTests(unittest.TestCase):
             compressed = Path(entry['output'])
             self.assertEqual(digest(movie), original)
             phases = list(dict.fromkeys(row['phase'] for row in progress.updates))
-            self.assertEqual(phases, ['Counting original frames', 'Compressing', 'Checking copy',
+            self.assertEqual(phases, ['Reading recording', 'Compressing', 'Checking copy',
                                      'Checking playback', 'Saving finished copy'])
             self.assertEqual(list(dict.fromkeys(row['step'] for row in progress.updates)), [1, 2, 3, 4, 5])
             self.assertTrue(all(row['total_steps'] == 5 for row in progress.updates))
             for phase in ('Compressing', 'Checking playback'):
                 frames = [row['frame'] for row in progress.updates if row['phase'] == phase and 'frame' in row]
                 self.assertGreater(len(set(frames)), 1, (phase, frames))
-                self.assertEqual(frames[-1], 60)
+                self.assertEqual(frames[-1], 180)
                 self.assertLess(frames[0], frames[-1])
             # Copying is still step two; each recording starts its own five steps.
             small = source / 'Small.mov'

@@ -27,7 +27,7 @@ These screenshots show the earlier menu; the current version also has step numbe
 1. [Download this repository as a ZIP](https://github.com/Drew-Goddyn/tools/archive/refs/heads/main.zip) and extract it, or clone it.
 2. Open this folder and **double-click `Install.command`**. Keep the folder together.
 
-The installer sets up Homebrew, Python 3.11+, and FFmpeg if needed, then installs the processing job and a paused-menu job for your macOS account. The paused-menu job exits at startup when processing is enabled. Homebrew may ask for your password or Apple's Command Line Tools; its [current system requirements](https://docs.brew.sh/Installation) apply. It compiles the small menu-bar display with the Swift compiler from Apple's Command Line Tools before changing an existing service. Run as your normal user, without `sudo`. Apple Silicon has been tested; the installer also recognizes Intel Homebrew paths.
+The installer sets up Homebrew, Python 3.11+, and FFmpeg if needed, then installs the processing job and a paused-menu job for your macOS account. It upgrades FFmpeg when decoded-frame statistics are unavailable; a direct install or upgrade checks this capability before changing the service. The paused-menu job exits at startup when processing is enabled. Homebrew may ask for your password or Apple's Command Line Tools; its [current system requirements](https://docs.brew.sh/Installation) apply. It compiles the small menu-bar display with the Swift compiler from Apple's Command Line Tools before changing an existing service. Run as your normal user, without `sudo`. Apple Silicon has been tested; the installer also recognizes Intel Homebrew paths.
 
 **Allow macOS's Desktop and Downloads folder prompts for Python when they appear.** The first save may wait for that permission. The installer does not grant itself privacy permissions or configure Full Disk Access.
 
@@ -45,15 +45,17 @@ Terminal, Codex, and this downloaded package can all be closed afterward. The in
 
 ## Quality and original protection
 
-Files already under the target are copied exactly, preserving their container. Larger standard SDR recordings are encoded as H.264 MP4 at the original resolution and frame timing, using CRF 18 and four encoder threads. AAC and ALAC audio are copied; other audio formats are converted to AAC. HDR, rotated, and higher-bit-depth recordings keep their original format.
+Files already under the target are copied exactly, preserving their container. Larger standard SDR recordings are encoded as H.264 MP4 at the original resolution and frame timing, using the `fast` software preset, CRF 18, and four encoder threads. AAC and ALAC audio are copied; other audio formats are converted to AAC. HDR, rotated, and higher-bit-depth recordings keep their original format.
 
 The cleaner makes one high-quality encode and keeps it, even above 20 MB. It does not run additional bitrate-targeted encodes or comparisons just to cross that threshold. If encoding increases size, the original is copied.
 
-Validation checks decoding, dimensions, duration, decoded frame counts, audio track/channel counts, and whether the source changed. Publication is atomic and never replaces a file. Saved publication intent allows interrupted publication to recover without duplicating a finished copy.
+Compression counts decoded input frames as it works. A single playback check then decodes the complete result, checks audio, and compares frame counts and individual frame timing. This removes two full video passes from the earlier version. Exact copies are compared byte for byte and decoded once. Quick metadata checks still verify dimensions, duration, and audio track/channel counts; the source must remain unchanged. Publication is atomic and never replaces a file. Saved publication intent allows interrupted publication to recover without duplicating a finished copy.
+
+The faster preset keeps the existing quality setting and soft size target. Upgrades preserve your configuration; an omitted `preset` now means `fast`. Set `"preset": "slow"` in the installed `config.json` to use the earlier encoder effort. This is still software encoding: hardware encoding produced much larger files at comparable measured quality on the tested recordings. See the [performance comparison](docs/performance.md) for measurements and their limits.
 
 ## How it starts and stops
 
-One `launchd` job uses `WatchPaths` for the recording folder and `RunAtLoad` for a reconciliation at login or resume. The job passes its own launchd target to the menu so Pause affects that job only. It runs with background priority and low-priority disk access. It has no `KeepAlive`, `StartInterval`, or calendar schedule.
+One `launchd` job uses `WatchPaths` for the recording folder and `RunAtLoad` for a reconciliation at login or resume. The job passes its own launchd target to the menu so Pause affects that job only. It uses `ProcessType: Standard`, CPU nice level 10, and low-priority disk access. This permits faster processing than macOS's more restrictive Background class while giving foreground work higher priority. The encoder uses four threads by default. CPU activity can be higher while processing, but finishes sooner; enabled idle behavior is unchanged. The job has no `KeepAlive`, `StartInterval`, or calendar schedule.
 
 A separate native menu job starts once at login, checks whether processing is paused, and exits immediately if it is enabled. While paused, it shows the Resume control without scanning folders, launching Python, or scheduling timers. macOS restarts this menu if it crashes, using `KeepAlive: {SuccessfulExit: false}` and a 30-second throttle. Resuming closes it with an explicit event; there is no recurring status check. These are [native launchd lifecycle controls](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchd.plist.5).
 
@@ -71,7 +73,7 @@ This tradeoff keeps the current folders and a fully exiting processor. A persist
 
 - The current recording and a compact numbered stage, such as **Step 2 of 5 · Compressing**.
 - A percentage and frame count during compression and playback verification. The percentage belongs to that step; validation follows compression.
-- Time spent in the step and when the frame count last advanced. If frames stop advancing for a minute, it says so without claiming the process is definitely stuck. Frame counting, copying, and file-integrity checks have no percentage because those operations do not report live progress.
+- Time spent in the step and when the frame count last advanced. If frames stop advancing for a minute, it says so without claiming the process is definitely stuck. Metadata reads, copying, and file-integrity checks have no percentage because those operations do not report live progress. The compression percentage can use the container's frame count as an estimate; verification uses actual decoded frames.
 - **Open finished recordings**, which opens the configured output folder.
 - **Pause processing**, which stops the whole batch and disables automatic processing until you resume it.
 
@@ -79,15 +81,15 @@ The five stages are:
 
 | Step | Menu label | What happens |
 | --- | --- | --- |
-| 1 | Counting original frames | Reads the whole original to get the frame count used for verification. Large recordings can take a few minutes; this check has no live percentage. |
-| 2 | Compressing / Copying unchanged | Makes one quality encode, or copies a recording that is already small enough or needs its original format. |
-| 3 | Checking copy | Compares frame counts, resolution, duration, and audio. Unchanged copies are also checked byte for byte. |
-| 4 | Checking playback | Decodes the copy to check video and audio playback. |
+| 1 | Reading recording | Reads metadata to choose compression or an unchanged copy. It no longer decodes the whole original before compression. |
+| 2 | Compressing / Copying unchanged | Makes one quality encode while counting decoded input frames, or copies a recording that is already small enough or needs its original format. |
+| 3 | Checking copy | Compares resolution, duration, and audio metadata. Unchanged copies are also checked byte for byte. |
+| 4 | Checking playback | Decodes the complete copy to check video and audio playback, decoded frame counts, and frame timing. |
 | 5 | Saving finished copy / Saving smaller original | Checks file integrity and publishes the result. If the encode is larger, it copies the original unchanged instead. |
 
 The count starts at one for each recording. Waiting for a recording to finish or for a retry sits outside those five stages. Elapsed time measures how long a step has been running; it does not establish that frames are advancing. The menu keeps these explanations out of the way.
 
-**Pause processing** uses macOS to disable future launches, then stop the worker and its child processes. The film icon stays visible with **Paused** beside it and **Resume processing** in its menu. Only this native menu remains; Python and FFmpeg stop. Originals and completed copies stay intact; an interrupted recording starts over after resuming, which also removes its temporary work. Pause persists across logins and restarts.
+**Pause processing** uses macOS to disable future launches, then stop the worker and its child processes. The worker kills and reaps an encoder that has not exited, so pause releases its memory instead of suspending it. The film icon stays visible with **Paused** beside it and **Resume processing** in its menu. Only this native menu remains; Python and FFmpeg stop. Originals and completed copies stay intact; an interrupted recording starts over after resuming, which also removes its temporary work. Pause persists across logins and restarts.
 
 To resume, click **Resume processing** in the film menu. You can also double-click **`Resume Screen Recording Cleaner.command`** in your finished-recordings folder, or [**`Resume.command`**](Resume.command) in this tool's folder. It enables the job and collects unfinished recordings and recordings made while paused. If an unrelated file already uses the shortcut's name, installation adds a numbered suffix. Upgrading preserves the pause and restores the paused menu. Resume before a manual rollback; rollback stops with instructions while paused.
 
@@ -151,13 +153,13 @@ Backups and upgrade progress live in the installed `backups/` and `upgrade.json`
 ## Development and verification
 
 ```sh
-python3 -m unittest -v test_progress test_cleaner test_install test_upgrade test_setup
+python3 -m unittest -v test_progress test_cleaner test_validation test_install test_upgrade test_setup
 python3 -m unittest -v test_progress_native test_menu_controls
 python3 -m unittest -v test_lifecycle
 python3 verify_idle.py --output /tmp/recording-cleaner-idle.json
 ```
 
-The first suite tests encoding, quality, history, publication, installation, actual FFmpeg progress, and broken or backpressured display pipes; launchctl and preference commands are doubled in installer tests. A paced generated clip proves intermediate frame advances without depending on a large fixture. The lifecycle suite creates a temporary real macOS launch job and generated movies under `/private/tmp`, then unloads it. It checks actual creation/copy/rename triggers, slow writes, overlapping arrivals, completion, and recovery after a stopped or crashed run. A command sandbox may require normal macOS service access for these tests.
+The first suite tests encoding, history, publication, installation, actual FFmpeg progress, and broken or backpressured display pipes; launchctl and preference commands are doubled in installer tests. Real-media tests cover variable frame timing, AAC/ALAC/PCM audio, corrupt video, missing frames, and changed timestamps. A termination test makes an encoder child ignore the normal stop signal and requires the worker to kill and reap it. A six-second paced generated clip proves intermediate frame advances without depending on a large fixture. The lifecycle suite creates a temporary real macOS launch job and generated movies under `/private/tmp`, then unloads it. It checks actual creation/copy/rename triggers, slow writes, overlapping arrivals, completion, and recovery after a stopped or crashed run. A command sandbox may require normal macOS service access for these tests.
 
 Build the display with `python3 build_progress.py`. The opt-in native display tests briefly show a test menu item, check normal exit on pipe closure, and kill an isolated parent to check crash cleanup. The menu-controls test reads actual AppKit rows and selects Pause and Resume programmatically in isolated launchd jobs. It checks that encoding stops while the paused menu stays available without progress timers, restores the menu after a crash and registration reload, verifies delivery on Resume, checks the external shortcut, and confirms both jobs stop launching once idle. These tests do not simulate a physical menu click or a Finder double-click. For desktop verification, check the menu during real processing, including the change from compression to verification. The display uses [Apple's native status-item API](https://developer.apple.com/documentation/appkit/nsstatusitem) and [FFmpeg's documented progress output](https://ffmpeg.org/ffmpeg.html). It receives full snapshots with the time frames actually advanced, so delayed display updates do not pretend a frame just advanced.
 

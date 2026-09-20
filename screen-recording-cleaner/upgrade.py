@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 from cleaner import save
-from install import (LABEL, PAUSED_LABEL, RUNTIME_FILES, is_paused, paused_agent_path,
+from install import (LABEL, PAUSED_LABEL, RUNTIME_FILES, check_ffmpeg, is_paused, paused_agent_path,
                      paused_service_definition, require_resumed, resume_shortcut, service_definition)
 from build_progress import build_progress
 from progress import PROGRESS_APP, UI_BINARY, UI_PLIST
@@ -100,6 +100,7 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
     support, agent = locations(user_home)
     bundle = Path(__file__).resolve().parent
     check_installation(support)
+    check_ffmpeg(json.loads((support / 'config.json').read_text()).get('ffmpeg') or shutil.which('ffmpeg'))
     progress_binary = build_progress(bundle)
     candidate = {name: hashlib.sha256((bundle / name).read_bytes()).hexdigest()
                  for name in (*RUNTIME_FILES, 'install.py', 'build_progress.py', 'ProgressMenu.swift', 'ProgressInfo.plist')}
