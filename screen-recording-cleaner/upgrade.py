@@ -10,7 +10,8 @@ import subprocess
 import tempfile
 import time
 from cleaner import save
-from install import RUNTIME_FILES, require_resumed, resume_shortcut, service_definition
+from install import (LABEL, PAUSED_LABEL, RUNTIME_FILES, is_paused, paused_agent_path,
+                     paused_service_definition, require_resumed, resume_shortcut, service_definition)
 from build_progress import build_progress
 from progress import PROGRESS_APP, UI_BINARY, UI_PLIST
 
@@ -35,19 +36,23 @@ def locations(user_home):
     return support, agent
 
 
-def registered(command):
-    return command(['/bin/launchctl', 'print', f'gui/{os.getuid()}/local.screen-recording-cleaner'],
+def registered(command, label=LABEL):
+    return command(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'],
                    capture_output=True).returncode == 0
 
 
 def stop(command):
-    if registered(command):
-        command(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/local.screen-recording-cleaner'], check=True)
+    for label in (PAUSED_LABEL, LABEL):
+        if registered(command, label):
+            command(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], check=True)
 
 
 def start(command, agent):
-    if not registered(command):
+    if not is_paused(command) and not registered(command):
         command(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', str(agent)], check=True)
+    paused_agent = paused_agent_path(agent)
+    if paused_agent.exists() and not registered(command, PAUSED_LABEL):
+        command(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', str(paused_agent)], check=True)
 
 
 def check_installation(support):
@@ -81,6 +86,11 @@ def restore(support, agent, journal):
             except OSError:
                 pass  # Leave any unrelated additional files alone.
     atomic_copy(backup / 'launch-agent.plist', agent)
+    paused_agent = paused_agent_path(agent)
+    if (backup / 'paused-agent.plist').exists():
+        atomic_copy(backup / 'paused-agent.plist', paused_agent)
+    else:
+        paused_agent.unlink(missing_ok=True)
     journal['phase'] = 'rolled_back'
     save(support / 'upgrade.json', journal)
 
@@ -91,7 +101,6 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
     bundle = Path(__file__).resolve().parent
     check_installation(support)
     progress_binary = build_progress(bundle)
-    require_resumed(command)
     candidate = {name: hashlib.sha256((bundle / name).read_bytes()).hexdigest()
                  for name in (*RUNTIME_FILES, 'install.py', 'build_progress.py', 'ProgressMenu.swift', 'ProgressInfo.plist')}
     candidate['RecordingProgress'] = hashlib.sha256(progress_binary.read_bytes()).hexdigest()
@@ -117,7 +126,6 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
             # Blocks only for an active recording, then excludes both old and new workers.
             with (support / 'state/lock').open('a') as worker_lock:
                 fcntl.flock(worker_lock, fcntl.LOCK_EX)
-                require_resumed(command)  # The user may have paused while we waited.
                 check_installation(support)
                 backup = Path(journal['backup'])
                 if journal['phase'] == 'preparing':
@@ -127,6 +135,8 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
                             (backup / name).parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(support / name, backup / name)
                     shutil.copy2(agent, backup / 'launch-agent.plist')
+                    if paused_agent_path(agent).exists():
+                        shutil.copy2(paused_agent_path(agent), backup / 'paused-agent.plist')
                     shutil.copy2(support / 'config.json', backup / 'config.json')
                     shutil.copy2(support / 'state/state.json', backup / 'state-snapshot.json')
                     journal['phase'] = 'prepared'
@@ -147,6 +157,12 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
                     os.fsync(f.fileno())
                     temporary = Path(f.name)
                 temporary.replace(agent)
+                with tempfile.NamedTemporaryFile(dir=agent.parent, delete=False) as f:
+                    plistlib.dump(paused_service_definition(support, support / 'config.json', agent), f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                    temporary = Path(f.name)
+                temporary.replace(paused_agent_path(agent))
                 journal['phase'] = 'installed'
                 save(journal_path, journal)
             # Do not launch a worker until the migration releases its ledger lock.
@@ -164,17 +180,19 @@ def upgrade(user_home=Path.home(), command=subprocess.run):
             raise RuntimeError(f'Upgrade failed; previous service restored if cutover had begun: {error}') from error
 
 
-def rollback(user_home=Path.home(), command=subprocess.run):
+def rollback(user_home=Path.home(), command=subprocess.run, *, preserve_pause=False):
     support, agent = locations(user_home)
     check_installation(support)
-    require_resumed(command)
+    if not preserve_pause:
+        require_resumed(command)
     with (support / 'install.lock').open('a') as installation_lock:
         fcntl.flock(installation_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         journal = json.loads((support / 'upgrade.json').read_text())
         if journal['phase'] != 'rolled_back':
             with (support / 'state/lock').open('a') as worker_lock:
                 fcntl.flock(worker_lock, fcntl.LOCK_EX)
-                require_resumed(command)
+                if not preserve_pause:
+                    require_resumed(command)
                 stop(command)
                 restore(support, agent, journal)
         start(command, agent)

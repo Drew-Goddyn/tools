@@ -2,9 +2,9 @@
 
 Record with **⌘⇧5**. A smaller, verified copy appears in **`~/Downloads/screen-recordings`**. The original stays in **`~/Desktop/screen recordings`**, with its filename and contents intact.
 
-macOS launches the processor when the recording folder changes. It waits for unfinished recordings, processes them, and **exits completely when there is no work left**. There is no resident helper, periodic scan, or idle timer. This is a personal convenience tool; a missed notification or crash can require a manual rerun.
+macOS launches the processor when the recording folder changes. It waits for unfinished recordings, processes them, and **exits completely when enabled with no work left**. While explicitly paused, only a small native menu remains so you can see the pause and resume it. There is no periodic scan or idle timer. This is a personal convenience tool; a missed notification or crash can require a manual rerun.
 
-A small **film icon in the menu bar appears while work is pending**. Click it to see the recording, **Step X of 5**, elapsed time, and actual frame progress during compression and playback verification. It disappears when processing finishes.
+A small **film icon in the menu bar appears while work is pending or processing is paused**. Click it to see the recording, **Step X of 5**, elapsed time, and actual frame progress during compression and playback verification. When paused, it says **Paused** beside the icon and offers **Resume processing**. It disappears when automatic processing is enabled and all work is finished.
 
 The icon starts near the clock, with progress percentages inside the menu so it stays compact. While it is visible, hold **⌘ and drag** to move it; macOS remembers the position for the next recording. This avoids placing a new, wide indicator behind the camera notch on a crowded menu bar.
 
@@ -12,7 +12,7 @@ To rebuild this tool with an agent, use the [rebuild prompt](PROMPT.md).
 
 ## Menu bar progress
 
-These screenshots show the earlier menu; the current version also has step numbers and **Pause processing**.
+These screenshots show the earlier menu; the current version also has step numbers, **Pause processing**, and a persistent **Paused / Resume processing** state.
 
 **Waiting for the recording to finish:**
 
@@ -27,7 +27,7 @@ These screenshots show the earlier menu; the current version also has step numbe
 1. [Download this repository as a ZIP](https://github.com/Drew-Goddyn/tools/archive/refs/heads/main.zip) and extract it, or clone it.
 2. Open this folder and **double-click `Install.command`**. Keep the folder together.
 
-The installer sets up Homebrew, Python 3.11+, and FFmpeg if needed, then installs one login job for your macOS account. Homebrew may ask for your password or Apple's Command Line Tools; its [current system requirements](https://docs.brew.sh/Installation) apply. It compiles the small menu-bar display with the Swift compiler from Apple's Command Line Tools before changing an existing service. Run as your normal user, without `sudo`. Apple Silicon has been tested; the installer also recognizes Intel Homebrew paths.
+The installer sets up Homebrew, Python 3.11+, and FFmpeg if needed, then installs the processing job and a paused-menu job for your macOS account. The paused-menu job exits at startup when processing is enabled. Homebrew may ask for your password or Apple's Command Line Tools; its [current system requirements](https://docs.brew.sh/Installation) apply. It compiles the small menu-bar display with the Swift compiler from Apple's Command Line Tools before changing an existing service. Run as your normal user, without `sudo`. Apple Silicon has been tested; the installer also recognizes Intel Homebrew paths.
 
 **Allow macOS's Desktop and Downloads folder prompts for Python when they appear.** The first save may wait for that permission. The installer does not grant itself privacy permissions or configure Full Disk Access.
 
@@ -55,11 +55,13 @@ Validation checks decoding, dimensions, duration, decoded frame counts, audio tr
 
 One `launchd` job uses `WatchPaths` for the recording folder and `RunAtLoad` for a reconciliation at login or resume. The job passes its own launchd target to the menu so Pause affects that job only. It runs with background priority and low-priority disk access. It has no `KeepAlive`, `StartInterval`, or calendar schedule.
 
+A separate native menu job starts once at login, checks whether processing is paused, and exits immediately if it is enabled. While paused, it shows the Resume control without scanning folders, launching Python, or scheduling timers. macOS restarts this menu if it crashes, using `KeepAlive: {SuccessfulExit: false}` and a 30-second throttle. Resuming closes it with an explicit event; there is no recurring status check. These are [native launchd lifecycle controls](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchd.plist.5).
+
 The Python processor scans for work and owns all history, encoding, and publication. While a known recording is unfinished, it waits for its next readiness or retry deadline. A temporary native directory watch can wake that wait when another file arrives. Failed recordings retain the existing retry backoff, up to one hour. Deleting a pending recording removes that work. Once nothing is pending, the processor closes its watch and exits; FFmpeg runs only during processing.
 
 Files arriving during encoding are collected before exit. Duplicate notifications are harmless because history prevents repeated output. A startup scan collects recordings made while the job was stopped.
 
-**Delivery is best effort.** Apple's `launchd.plist` manual warns that `WatchPaths` notifications can be missed. A final folder check reduces the shutdown gap but cannot eliminate it. A crash, a notification missed at shutdown, or a removed/replaced recording folder can leave a recording waiting for the next folder change, login, or manual rerun. There is no automatic crash-restart loop or periodic recovery check. Originals and processing history remain available for recovery. A corrupt unfinished file can keep the processor waiting on retries until it is fixed or removed from the watched folder.
+**Delivery is best effort.** Apple's `launchd.plist` manual warns that `WatchPaths` notifications can be missed. A final folder check reduces the shutdown gap but cannot eliminate it. A crash, a notification missed at shutdown, or a removed/replaced recording folder can leave a recording waiting for the next folder change, login, or manual rerun. The processor has no automatic crash-restart loop or periodic recovery check. Originals and processing history remain available for recovery. A corrupt unfinished file can keep the processor waiting on retries until it is fixed or removed from the watched folder.
 
 This tradeoff keeps the current folders and a fully exiting processor. A persistent listener or an inbox that empties after processing would provide stronger automatic recovery, at the cost of a different workflow. They are deliberately outside this version. See [Apple's launchd guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) and the local `man launchd.plist` for the native trigger behavior.
 
@@ -85,11 +87,11 @@ The five stages are:
 
 The count starts at one for each recording. Waiting for a recording to finish or for a retry sits outside those five stages. Elapsed time measures how long a step has been running; it does not establish that frames are advancing. The menu keeps these explanations out of the way.
 
-**Pause processing** uses macOS to disable future launches, then stop the worker and its child processes. The menu exits too. Originals and completed copies stay intact; an interrupted recording starts over after resuming, which also removes its temporary work. Pause persists across logins and restarts.
+**Pause processing** uses macOS to disable future launches, then stop the worker and its child processes. The film icon stays visible with **Paused** beside it and **Resume processing** in its menu. Only this native menu remains; Python and FFmpeg stop. Originals and completed copies stay intact; an interrupted recording starts over after resuming, which also removes its temporary work. Pause persists across logins and restarts.
 
-To resume, double-click **`Resume Screen Recording Cleaner.command`** in your finished-recordings folder, or [**`Resume.command`**](Resume.command) in this tool's folder. It enables the job and collects unfinished recordings and recordings made while paused. If an unrelated file already uses the shortcut's name, installation adds a numbered suffix. Resume before installing, upgrading, or rolling back; those operations stop with instructions while paused rather than quietly resuming it.
+To resume, click **Resume processing** in the film menu. You can also double-click **`Resume Screen Recording Cleaner.command`** in your finished-recordings folder, or [**`Resume.command`**](Resume.command) in this tool's folder. It enables the job and collects unfinished recordings and recordings made while paused. If an unrelated file already uses the shortcut's name, installation adds a numbered suffix. Upgrading preserves the pause and restores the paused menu. Resume before a manual rollback; rollback stops with instructions while paused.
 
-The display takes no keyboard focus, opens no window, and adds no Dock icon. It starts only for known work, receives updates through a pipe, and exits when the processor closes that pipe or dies. It does not watch folders or run an idle schedule. One delivery thread waits on pipe events while the display is active, retaining the newest snapshot if the display is slow. A failed display does not block processing. Set `"show_progress": false` in the installed `config.json` to disable it for subsequent runs.
+The display takes no keyboard focus, opens no window, and adds no Dock icon. During processing it receives updates through a pipe and exits when the processor closes that pipe or dies. The paused menu is independent, so stopping the encoder leaves Resume available. It does not watch folders or run an idle schedule. One delivery thread waits on pipe events while the display is active, retaining the newest snapshot if the display is slow. A failed display does not block processing. Set `"show_progress": false` in the installed `config.json` to disable processing progress for subsequent runs. An explicit pause remains visible.
 
 Read processing history and the most recent run:
 
@@ -119,6 +121,7 @@ Pause from the menu, or run:
 ```sh
 launchctl disable "gui/$(id -u)/local.screen-recording-cleaner"
 launchctl bootout "gui/$(id -u)/local.screen-recording-cleaner"
+launchctl kickstart "gui/$(id -u)/local.screen-recording-cleaner.paused-menu"
 ```
 
 Resume with the one-click shortcut, or run the installed command:
@@ -129,9 +132,9 @@ bash "$HOME/Library/Application Support/Screen Recording Cleaner/Resume.command"
 
 ## Upgrade and rollback
 
-`Install.command` waits for an active encode, takes the existing history lock, backs up the installed programs and launch configuration, and replaces them. A previous resident listener is removed. The new job starts after the lock is released. Folder settings and the latest processing history are preserved.
+`Install.command` waits for an active encode, takes the existing history lock, backs up the installed programs and launch configuration, and replaces them. A previous resident listener is removed. After the lock is released, an enabled installation starts processing; a paused installation restores its Resume menu without enabling processing. Folder settings and the latest processing history are preserved.
 
-The menu display is built before cutover. A compiler failure leaves the current service running. Rollback restores the previous display, or removes it when rolling back to a version that did not have one.
+The menu display is built before cutover. A compiler failure leaves the current service running. Rollback restores the previous display and menu-job registration, or removes them when rolling back to a version that did not have them. A failed upgrade keeps the prior pause state and never resets processing history.
 
 Setup checks that the processor starts or finishes successfully. If activation fails after replacement, it restores the prior service. Interrupted upgrades can resume from the same package. Keep this package to run these management commands:
 
@@ -156,7 +159,7 @@ python3 verify_idle.py --output /tmp/recording-cleaner-idle.json
 
 The first suite tests encoding, quality, history, publication, installation, actual FFmpeg progress, and broken or backpressured display pipes; launchctl and preference commands are doubled in installer tests. A paced generated clip proves intermediate frame advances without depending on a large fixture. The lifecycle suite creates a temporary real macOS launch job and generated movies under `/private/tmp`, then unloads it. It checks actual creation/copy/rename triggers, slow writes, overlapping arrivals, completion, and recovery after a stopped or crashed run. A command sandbox may require normal macOS service access for these tests.
 
-Build the display with `python3 build_progress.py`. The opt-in native display tests briefly show a test menu item, check normal exit on pipe closure, and kill an isolated parent to check crash cleanup. The menu-controls test reads actual AppKit rows and selects the Pause item programmatically inside an isolated launchd job, checks that its process group stops, then runs the real Resume command and verifies delivery. These tests do not simulate a physical menu click or a Finder double-click. For desktop verification, check the menu during real processing, including the change from compression to verification. The display uses [Apple's native status-item API](https://developer.apple.com/documentation/appkit/nsstatusitem) and [FFmpeg's documented progress output](https://ffmpeg.org/ffmpeg.html). It receives full snapshots with the time frames actually advanced, so delayed display updates do not pretend a frame just advanced.
+Build the display with `python3 build_progress.py`. The opt-in native display tests briefly show a test menu item, check normal exit on pipe closure, and kill an isolated parent to check crash cleanup. The menu-controls test reads actual AppKit rows and selects Pause and Resume programmatically in isolated launchd jobs. It checks that encoding stops while the paused menu stays available without progress timers, restores the menu after a crash and registration reload, verifies delivery on Resume, checks the external shortcut, and confirms both jobs stop launching once idle. These tests do not simulate a physical menu click or a Finder double-click. For desktop verification, check the menu during real processing, including the change from compression to verification. The display uses [Apple's native status-item API](https://developer.apple.com/documentation/appkit/nsstatusitem) and [FFmpeg's documented progress output](https://ffmpeg.org/ffmpeg.html). It receives full snapshots with the time frames actually advanced, so delayed display updates do not pretend a frame just advanced.
 
 Placement uses a stable AppKit autosave name and registers an initial default for AppKit's undocumented `NSStatusItem Preferred Position` preference. An existing saved position takes precedence. The app exits without explicitly removing the item, which would clear the saved position. Check actual placement on the target Mac: AppKit can report `isVisible` as true even when an item is hidden behind the notch.
 

@@ -26,6 +26,8 @@ class SetupTests(unittest.TestCase):
         self.home = self.root / 'Test User'
         self.support, self.agent = upgrade.locations(self.home)
         self.loaded = False
+        self.menu_loaded = False
+        self.paused = False
         self.preference = None
         self.calls = []
         self.fail_next_start = False
@@ -37,6 +39,19 @@ class SetupTests(unittest.TestCase):
         self.calls.append(args)
         if args[0] == '/bin/launchctl':
             action = args[1]
+            if action == 'print-disabled':
+                state = 'disabled' if self.paused else 'enabled'
+                return subprocess.CompletedProcess(args, 0, stdout=f'"local.screen-recording-cleaner" => {state}')
+            menu = args[-1].endswith('.paused-menu') or args[-1].endswith('.paused-menu.plist')
+            if menu:
+                if action == 'print':
+                    return subprocess.CompletedProcess(args, 0 if self.menu_loaded else 1,
+                                                       stdout='pid = 67890' if self.paused and self.menu_loaded else '')
+                if action == 'bootstrap':
+                    self.menu_loaded = True
+                if action == 'bootout':
+                    self.menu_loaded = False
+                return subprocess.CompletedProcess(args, 0, stdout='')
             if action == 'print':
                 return subprocess.CompletedProcess(args, 0 if self.loaded else 1,
                                                    stdout='state = not running\nlast exit code = 0\n' if self.loaded else '')
@@ -117,6 +132,34 @@ class SetupTests(unittest.TestCase):
             upgrade.rollback(self.home, self.command)
         self.assertEqual(json.loads(ledger.read_text()), latest)
         self.assertEqual((self.support / 'README.md').read_bytes(), old_readme)
+
+    def test_paused_setup_keeps_pause_and_verifies_menu_instead_of_worker(self):
+        self.establish_confirmed_install()
+        self.paused = True
+        self.loaded = False
+        history = (self.support / 'state/state.json').read_bytes()
+        self.calls.clear()
+        with patch.object(upgrade, '__file__', str(self.release())):
+            self.run_setup()
+        self.assertTrue(self.paused)
+        self.assertFalse(self.loaded)
+        self.assertTrue(self.menu_loaded)
+        self.assertEqual((self.support / 'state/state.json').read_bytes(), history)
+        self.assertFalse(any(c[1] in ('enable', 'kickstart') for c in self.calls if c[0] == '/bin/launchctl'))
+
+    def test_failed_paused_setup_restores_previous_release_and_pause(self):
+        self.establish_confirmed_install()
+        original = (self.support / 'README.md').read_bytes()
+        self.paused = True
+        self.loaded = False
+        with patch.object(upgrade, '__file__', str(self.release())), \
+                patch.object(setup, 'wait_for_paused_menu', side_effect=RuntimeError('Menu failed')):
+            with self.assertRaisesRegex(RuntimeError, 'Menu failed'):
+                self.run_setup()
+        self.assertTrue(self.paused)
+        self.assertFalse(self.loaded)
+        self.assertEqual((self.support / 'README.md').read_bytes(), original)
+        self.assertEqual(json.loads((self.support / 'upgrade.json').read_text())['phase'], 'rolled_back')
 
     def test_failed_new_worker_restores_previous_release(self):
         self.establish_confirmed_install()

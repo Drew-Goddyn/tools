@@ -1,4 +1,5 @@
 """Opt-in native menu and isolated launchd pause/resume checks. No personal recordings."""
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -13,61 +14,65 @@ import time
 import unittest
 
 from cleaner import Cleaner, digest
-from install import service_definition
+from install import paused_agent_path, paused_service_definition, service_definition
 from progress import UI_BINARY, UI_PLIST
 
 BUNDLE = Path(__file__).resolve().parent
 
-# Reuse the actual menu class; replace only its command-line entry point. The
-# extension inspects AppKit's rows and dispatches the real menu action by index.
+# Reuse the actual menu class and production entry points. Test hooks inspect
+# AppKit rows and select the real menu action by index.
 HARNESS = r'''
 extension ProgressMenu {
     func rows() -> [String] {
         menu.items.filter { !$0.isHidden && !$0.isSeparatorItem }.map { $0.title }
     }
-    func width() -> CGFloat { menu.size.width }
-    func pressPause() {
+    func inspection() -> [String: Any] {
+        ["rows": rows(), "width": menu.size.width, "title": item.button?.title ?? "",
+         "has_timer": menuClock != nil || staleCheck != nil]
+    }
+    func pressControl() {
         let index = menu.index(of: pauseRow)
         precondition(index >= 0 && pauseRow.isEnabled)
         menu.performActionForItem(at: index)
     }
+    func writeReady() throws {
+        let name = resumeAgent == nil ? ".menu-test-ready" : ".paused-menu-test-ready"
+        var snapshot = inspection()
+        snapshot["pid"] = getpid()
+        try JSONSerialization.data(withJSONObject: snapshot).write(to: output.appendingPathComponent(name), options: .atomic)
+    }
 }
 let arguments = CommandLine.arguments
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-if arguments[1] == "render" {
-    let controller = ProgressMenu(output: URL(fileURLWithPath: "/private/tmp"))
+if arguments[1] == "render" || arguments[1] == "render-paused" {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let paused = arguments[1] == "render-paused"
+    let controller = ProgressMenu(output: URL(fileURLWithPath: "/private/tmp"),
+        launchdTarget: paused ? "gui/\(getuid())/local.screen-recording-cleaner.test.render" : nil,
+        resumeAgent: paused ? URL(fileURLWithPath: "/private/tmp/render.plist") : nil)
     let samples = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: arguments[2]))) as! [[String: Any]]
     var results = [[String: Any]]()
     for sample in samples {
-        var data = try JSONSerialization.data(withJSONObject: sample)
-        data.append(10)
-        controller.read(data)
-        results.append(["rows": controller.rows(), "width": controller.width()])
+        if paused {
+            controller.menuWillOpen(NSMenu())
+        } else {
+            var data = try JSONSerialization.data(withJSONObject: sample)
+            data.append(10)
+            controller.read(data)
+        }
+        results.append(controller.inspection())
     }
     FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: results))
     exit(0)
 }
-let target = arguments[2]
-guard target.hasPrefix("gui/\(getuid())/local.screen-recording-cleaner.test.") else { exit(77) }
-let output = URL(fileURLWithPath: arguments[1])
-let controller = ProgressMenu(output: output, launchdTarget: target)
-let input = FileHandle.standardInput
-input.readabilityHandler = { handle in
-    let data = handle.availableData
-    if data.isEmpty {
-        handle.readabilityHandler = nil
-        DispatchQueue.main.async { controller.finish() }
-    } else {
-        DispatchQueue.main.async { controller.read(data) }
-    }
+var testControl: DispatchSourceSignal?
+func installTestControl(_ controller: ProgressMenu) {
+    signal(SIGUSR2, SIG_IGN)
+    testControl = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+    testControl!.setEventHandler { controller.pressControl() }
+    testControl!.resume()
+    try! controller.writeReady()
 }
-signal(SIGUSR2, SIG_IGN)
-let pauseSignal = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
-pauseSignal.setEventHandler { controller.pressPause() }
-pauseSignal.resume()
-try Data().write(to: output.appendingPathComponent(".menu-test-ready"), options: .atomic)
-app.run()
 '''
 
 
@@ -77,10 +82,13 @@ class MenuControlsTests(unittest.TestCase):
         cls.build = tempfile.TemporaryDirectory(prefix='recording-menu-tests-', dir='/private/tmp')
         root = Path(cls.build.name)
         source = (BUNDLE / 'ProgressMenu.swift').read_text()
-        body, separator, _ = source.partition('\nguard (2...3).contains')
+        body, separator, entry = source.partition('\n// Command-line entry point.')
         assert separator, 'Native entry point moved; keep the real menu class in this test.'
         swift = root / 'MenuTest.swift'
-        swift.write_text(body + HARNESS)
+        # Keep the production entry points, including disabled-state checks.
+        entry = entry.replace('    app.run()', '    installTestControl(controller)\n    app.run()')
+        entry = entry.replace('\napp.run()', '\ninstallTestControl(controller)\napp.run()')
+        swift.write_text(body + HARNESS + entry)
         cls.menu = root / 'MenuTest'
         subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', '-framework', 'AppKit',
                         '-module-cache-path', str(root / 'modules'), str(swift), '-o', str(cls.menu)],
@@ -113,6 +121,18 @@ class MenuControlsTests(unittest.TestCase):
             self.assertFalse(any('Pause processing' in sample['rows'] for sample in samples),
                              'Manual previews must not control the installed job')
 
+    def test_paused_menu_is_clear_and_has_no_progress_timers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'snapshots.json'
+            path.write_text('[{}]')
+            result = subprocess.run([str(self.menu), 'render-paused', str(path)], capture_output=True,
+                                    text=True, check=True, timeout=15)
+            menu = json.loads(result.stdout)[0]
+            self.assertEqual(menu['title'].strip(), 'Paused')
+            self.assertEqual(menu['rows'], ['Screen Recording Cleaner', 'Paused',
+                                           'Open finished recordings', 'Resume processing'])
+            self.assertFalse(menu['has_timer'])
+
     def test_menu_pause_stops_children_and_resume_collects_recordings(self):
         with tempfile.TemporaryDirectory(prefix='recording-pause-', dir='/private/tmp') as temp:
             root = Path(temp)
@@ -130,7 +150,7 @@ class MenuControlsTests(unittest.TestCase):
             paced.write_text('#!' + sys.executable + '\nimport os,sys\na=sys.argv[1:]\ni=a.index("-i")\n'
                              'os.execv(' + repr(ffmpeg) + ',[' + repr(ffmpeg) + ']+a[:i]+["-re"]+a[i:])\n')
             paced.chmod(0o700)
-            for name in ('cleaner.py', 'progress.py'):
+            for name in ('cleaner.py', 'progress.py', 'Resume.command'):
                 shutil.copy2(BUNDLE / name, support / name)
             (support / UI_BINARY).parent.mkdir(parents=True)
             # Run the real menu class inside the job, with only a test signal to
@@ -161,9 +181,19 @@ class MenuControlsTests(unittest.TestCase):
             args = definition['ProgramArguments']
             args[args.index('--launchd-target') + 1] = target
             agent.write_bytes(plistlib.dumps(definition))
+            paused_agent = paused_agent_path(agent)
+            paused_definition = paused_service_definition(support, config_path, agent)
+            paused_definition['ThrottleInterval'] = 1
+            paused_agent.write_bytes(plistlib.dumps(paused_definition))
+            paused_target = target + '.paused-menu'
 
             def ctl(*args, check=True):
                 return subprocess.run(['/bin/launchctl', *args], capture_output=True, text=True, check=check)
+
+            def paused_pid():
+                result = ctl('print', paused_target, check=False)
+                match = re.search(r'\bpid = (\d+)', result.stdout)
+                return int(match[1]) if match else None
 
             def ledger():
                 return json.loads((support / 'state/state.json').read_text())['files']
@@ -184,7 +214,10 @@ class MenuControlsTests(unittest.TestCase):
                     time.sleep(.05)
 
             registered_here = False
+            menu_registered_here = False
             try:
+                ctl('bootstrap', f'gui/{os.getuid()}', str(paused_agent))
+                menu_registered_here = True
                 ctl('bootstrap', f'gui/{os.getuid()}', str(agent))
                 registered_here = True
                 first = incoming / 'First.mov'
@@ -200,19 +233,73 @@ class MenuControlsTests(unittest.TestCase):
                 self.assertRegex(ctl('print-disabled', f'gui/{os.getuid()}').stdout,
                                  re.escape(f'"{label}"') + r'\s*=>\s*(?:true|disabled)\b')
                 self.assertNotEqual(ctl('bootstrap', f'gui/{os.getuid()}', str(agent), check=False).returncode, 0)
+                wait(lambda: paused_pid() is not None and (output / '.paused-menu-test-ready').exists())
+                self.assertNotIn(str(paused_pid()), owned)
+                snapshot = json.loads((output / '.paused-menu-test-ready').read_text())
+                self.assertIn('Resume processing', snapshot['rows'])
+                self.assertFalse(snapshot['has_timer'])
+                # A crashed paused menu is restored by macOS, without restarting processing.
+                first_paused_pid = paused_pid()
+                os.kill(first_paused_pid, signal.SIGKILL)
+                wait(lambda: paused_pid() not in (None, first_paused_pid)
+                     and json.loads((output / '.paused-menu-test-ready').read_text())['pid'] == paused_pid())
+                # Reload its registration to exercise the same startup used at login.
+                ctl('bootout', paused_target)
+                ctl('bootstrap', f'gui/{os.getuid()}', str(paused_agent))
+                wait(lambda: paused_pid() is not None
+                     and json.loads((output / '.paused-menu-test-ready').read_text())['pid'] == paused_pid())
+                self.assertNotEqual(ctl('print', target, check=False).returncode, 0)
+                before = (support / 'state/state.json').read_bytes()
                 second = incoming / 'While paused.mov'
                 shutil.copyfile(fixture, second)
                 self.assertNotIn(str(second), ledger())
                 self.assertFalse(list(output.glob('* - clean.*')))
-                subprocess.run(['/bin/bash', str(BUNDLE / 'Resume.command'), str(agent)],
-                               check=True, capture_output=True, text=True)
+                time.sleep(.5)  # Observe that incoming recordings do not wake the paused worker.
+                self.assertEqual((support / 'state/state.json').read_bytes(), before)
+                self.assertFalse(group())
+                # Select Resume on the actual menu, not a substitute launchctl call.
+                os.kill(paused_pid(), signal.SIGUSR2)
                 wait(lambda: all(ledger().get(str(path), {}).get('status') == 'done' for path in (first, second)) and not group())
                 self.assertEqual(ledger()[str(archive)]['status'], 'existing')
                 for path in (first, second, archive):
                     self.assertEqual(digest(path), digest(fixture))
                 self.assertEqual(len(list(output.glob('* - clean.*'))), 2)
                 self.assertFalse(list(output.glob('.processing-*')))
+                wait(lambda: paused_pid() is None)
+                # Hold the transition lock while menu recovery and external
+                # Resume both arrive. Neither may change worker state until it
+                # owns the lock, and either acquisition order must finish resumed.
+                ctl('disable', target)
+                with (support / 'control.lock').open('a') as control_lock:
+                    fcntl.flock(control_lock, fcntl.LOCK_EX)
+                    ctl('kickstart', paused_target)
+                    wait(lambda: paused_pid() is not None)
+                    resumed = subprocess.Popen(['/bin/bash', str(BUNDLE / 'Resume.command'), str(agent)],
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    try:
+                        time.sleep(.25)
+                        self.assertIsNone(resumed.poll(), 'Resume bypassed the transition lock')
+                        self.assertEqual(ctl('print', target, check=False).returncode, 0,
+                                         'Menu startup stopped the worker without the transition lock')
+                    finally:
+                        fcntl.flock(control_lock, fcntl.LOCK_UN)
+                stdout, stderr = resumed.communicate(timeout=15)
+                self.assertEqual(resumed.returncode, 0, stdout + stderr)
+                wait(lambda: paused_pid() is None and not group()
+                     and 'state = not running' in ctl('print', target).stdout
+                     and json.loads((support / 'state/runner.json').read_text())['state'] == 'idle')
+                services = [ctl('print', name).stdout for name in (target, paused_target)]
+                histories = (support / 'state/state.json').read_bytes()
+                time.sleep(3)
+                for old, name in zip(services, (target, paused_target)):
+                    new = ctl('print', name).stdout
+                    self.assertEqual(re.search(r'\bruns = \d+', old)[0], re.search(r'\bruns = \d+', new)[0])
+                self.assertEqual((support / 'state/state.json').read_bytes(), histories)
+                self.assertFalse(group())
+                self.assertIsNone(paused_pid())
             finally:
+                if menu_registered_here:
+                    ctl('bootout', paused_target, check=False)
                 if registered_here:
                     ctl('bootout', target, check=False)
                     ctl('enable', target, check=False)

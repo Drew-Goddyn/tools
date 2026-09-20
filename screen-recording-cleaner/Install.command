@@ -47,4 +47,5 @@ printf '\nInstalled. Record with Command-Shift-5 as usual. Clean copies arrive i
 printf 'Allow the macOS Desktop/Downloads folder prompts for the helper when they appear.\n'
 printf 'The first copy waits for 30 seconds of stability, then any encoding and validation time.\n'
 printf 'While work is pending, click the film icon in the menu bar for progress and the finished-recordings folder.\n'
-printf 'The processor exits completely when no unfinished recordings or retries remain.\n'
+printf 'While paused, the film icon stays visible with a Resume processing action, including after login.\n'
+printf 'Upgrades preserve a pause. When enabled and idle, the menu and processor exit completely.\n'

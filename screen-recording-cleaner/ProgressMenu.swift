@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Darwin
 
 struct Update: Decodable {
     let version: Int
@@ -26,6 +27,8 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
     private let pauseRow = NSMenuItem()
     private let output: URL
     private let launchdTarget: String?
+    private let resumeAgent: URL?
+    private let resumeScript: URL?
     private var pausing = false
     private var inputEnded = false
     private var latest: Update?
@@ -35,9 +38,11 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
     private var menuClock: Timer?
     private var buffer = Data()
 
-    init(output: URL, launchdTarget: String? = nil) {
+    init(output: URL, launchdTarget: String? = nil, resumeAgent: URL? = nil, resumeScript: URL? = nil) {
         self.output = output
         self.launchdTarget = launchdTarget
+        self.resumeAgent = resumeAgent
+        self.resumeScript = resumeScript
         // AppKit's autosaved position preference is undocumented. Register only
         // an initial default near the clock; a user's saved position wins.
         UserDefaults.standard.register(defaults: ["NSStatusItem Preferred Position RecordingProgress": 0])
@@ -55,8 +60,8 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
         open.target = self
         menu.addItem(open)
         if launchdTarget != nil {
-            pauseRow.title = "Pause processing"
-            pauseRow.action = #selector(pauseProcessing)
+            pauseRow.title = resumeAgent == nil ? "Pause processing" : "Resume processing"
+            pauseRow.action = resumeAgent == nil ? #selector(pauseProcessing) : #selector(resumeProcessing)
             pauseRow.target = self
             menu.addItem(pauseRow)
         }
@@ -64,6 +69,15 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
         if let button = item.button {
             button.image = NSImage(systemSymbolName: "film", accessibilityDescription: "Screen recording cleaner")
             button.imagePosition = .imageOnly
+        }
+        if resumeAgent != nil {
+            fileRow.title = "Screen Recording Cleaner"
+            phaseRow.title = "Paused"
+            for row in [frameRow, elapsedRow, advanceRow] { row.isHidden = true }
+            item.length = NSStatusItem.variableLength
+            item.button?.title = " Paused"
+            item.button?.imagePosition = .imageLeading
+            item.button?.toolTip = "Screen recording cleaner is paused. Click to resume."
         }
     }
 
@@ -130,6 +144,7 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        if resumeAgent != nil { return }
         render()
         menuClock?.invalidate()
         let clock = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.render() }
@@ -144,9 +159,9 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
 
     @objc private func openOutput() { NSWorkspace.shared.open(output) }
 
-    private func launchctl(_ arguments: [String], completion: @escaping (Int32) -> Void) {
+    private func run(_ executable: String, _ arguments: [String], completion: @escaping (Int32) -> Void) {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
@@ -154,6 +169,10 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
             DispatchQueue.main.async { completion(process.terminationStatus) }
         }
         do { try process.run() } catch { completion(-1) }
+    }
+
+    private func launchctl(_ arguments: [String], completion: @escaping (Int32) -> Void) {
+        run("/bin/launchctl", arguments, completion: completion)
     }
 
     @objc private func pauseProcessing() {
@@ -167,13 +186,39 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
                 pauseFailed("macOS couldn't pause automatic processing. Please try again.")
                 return
             }
-            launchctl(["bootout", target]) { [self] code in
-                if code == 0 {
-                    pausing = false
-                    finish()
-                } else {
-                    pauseFailed("Automatic processing is paused, but macOS couldn't stop the current batch.")
+            // The paused menu has its own launchd job, so stopping this worker
+            // cannot remove the user's Resume control. It stops the worker.
+            launchctl(["kickstart", target + ".paused-menu"]) { [self] code in
+                guard code == 0 else {
+                    launchctl(["enable", target]) { [self] restored in
+                        pauseFailed(restored == 0
+                            ? "The paused menu couldn't start. Automatic processing is still enabled."
+                            : "Automatic processing is paused. Use the Resume shortcut in your finished recordings folder.")
+                    }
+                    return
                 }
+                pausing = false
+                finish()
+            }
+        }
+    }
+
+    @objc private func resumeProcessing() {
+        guard let agent = resumeAgent, let script = resumeScript, !pausing else { return }
+        pausing = true
+        pauseRow.title = "Resuming…"
+        pauseRow.isEnabled = false
+        run("/bin/bash", [script.path, agent.path, "--from-menu"]) { [self] code in
+            pausing = false
+            if code == 0 {
+                finish()
+            } else {
+                pauseRow.title = "Resume processing"
+                pauseRow.isEnabled = true
+                let alert = NSAlert()
+                alert.messageText = "Couldn't resume processing"
+                alert.informativeText = "Please try again, or use the Resume shortcut in your finished recordings folder. Your originals are safe."
+                alert.runModal()
             }
         }
     }
@@ -199,6 +244,124 @@ final class ProgressMenu: NSObject, NSMenuDelegate {
     }
 }
 
+func workerIsPaused(_ target: String) throws -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    process.arguments = ["print-disabled", "gui/\(getuid())"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { throw NSError(domain: "launchctl", code: Int(process.terminationStatus)) }
+    let label = String(target.split(separator: "/").last!)
+    let pattern = "\"" + NSRegularExpression.escapedPattern(for: label) + "\"\\s*=>\\s*(?:true|disabled)\\b"
+    return String(decoding: data, as: UTF8.self).range(of: pattern, options: .regularExpression) != nil
+}
+
+// Only transition commands hold this lock. A paused menu holds no lock or timer.
+struct ServiceControl {
+    let agent: URL
+    let target: String
+    let lock: URL
+
+    init(agent: URL) throws {
+        let data = try Data(contentsOf: agent)
+        guard let definition = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let label = definition["Label"] as? String,
+              label == "local.screen-recording-cleaner" || label.hasPrefix("local.screen-recording-cleaner.test."),
+              let args = definition["ProgramArguments"] as? [String], args.count > 1,
+              URL(fileURLWithPath: args[1]).lastPathComponent == "cleaner.py" else {
+            throw NSError(domain: "ScreenRecordingCleaner", code: 64)
+        }
+        self.agent = agent
+        target = "gui/\(getuid())/\(label)"
+        lock = URL(fileURLWithPath: args[1]).deletingLastPathComponent().appendingPathComponent("control.lock")
+    }
+
+    func withLock<T>(_ action: () throws -> T) throws -> T {
+        let fd = Darwin.open(lock.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { Darwin.close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { flock(fd, LOCK_UN) }
+        return try action()
+    }
+
+    @discardableResult
+    func launchctl(_ arguments: [String], checked: Bool = true) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        if checked && process.terminationStatus != 0 {
+            throw NSError(domain: "launchctl", code: Int(process.terminationStatus))
+        }
+        return process.terminationStatus
+    }
+
+    func preparePausedMenu() throws -> Bool {
+        try withLock {
+            guard try workerIsPaused(target) else { return false }
+            if try launchctl(["print", target], checked: false) == 0 {
+                try launchctl(["bootout", target])
+            }
+            return true
+        }
+    }
+
+    func resume() throws {
+        try withLock {
+            try launchctl(["enable", target])
+            if try launchctl(["print", target], checked: false) == 0 {
+                try launchctl(["kickstart", target])
+            } else {
+                try launchctl(["bootstrap", "gui/\(getuid())", agent.path])
+            }
+        }
+    }
+}
+
+// Command-line entry point.
+if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--resume" {
+    do {
+        try ServiceControl(agent: URL(fileURLWithPath: CommandLine.arguments[2])).resume()
+        exit(0)
+    } catch {
+        fputs("Couldn't resume the recording cleaner: \(error)\n", stderr)
+        exit(1)
+    }
+}
+if CommandLine.arguments.count == 5 && CommandLine.arguments[1] == "--paused" {
+    let args = CommandLine.arguments
+    let agent = URL(fileURLWithPath: args[3])
+    // Register before checking state, so a concurrent external Resume can close
+    // a menu still starting up. The queued signal is handled by the main loop.
+    signal(SIGUSR1, SIG_IGN)
+    let resumed = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+    resumed.setEventHandler { exit(0) }
+    resumed.resume()
+    let control: ServiceControl
+    do {
+        control = try ServiceControl(agent: agent)
+        if try !control.preparePausedMenu() { exit(0) }
+    } catch {
+        fputs("Couldn't show the paused recording menu: \(error)\n", stderr)
+        exit(1)
+    }
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let controller = ProgressMenu(output: URL(fileURLWithPath: args[2], isDirectory: true),
+        launchdTarget: control.target, resumeAgent: agent, resumeScript: URL(fileURLWithPath: args[4]))
+    withExtendedLifetime((controller, resumed)) {
+        app.run()
+    }
+    exit(0)
+}
 guard (2...3).contains(CommandLine.arguments.count) else { exit(64) }
 let target = CommandLine.arguments.count == 3 ? CommandLine.arguments[2] : nil
 if let target, !target.hasPrefix("gui/\(getuid())/local.screen-recording-cleaner") { exit(64) }

@@ -14,6 +14,8 @@ from build_progress import build_progress
 from progress import UI_BINARY, UI_PLIST
 
 RUNTIME_FILES = ('cleaner.py', 'progress.py', 'Resume.command', 'README.md')
+LABEL = 'local.screen-recording-cleaner'
+PAUSED_LABEL = LABEL + '.paused-menu'
 
 
 def service_definition(support, config_path):
@@ -30,14 +32,34 @@ def service_definition(support, config_path):
             "StandardErrorPath": str(support / "launchd.log")}
 
 
-def require_resumed(command):
+def is_paused(command):
     result = command(['/bin/launchctl', 'print-disabled', f'gui/{os.getuid()}'],
                      capture_output=True, text=True, check=True)
     text = result.stdout or ''
     if isinstance(text, bytes):
         text = text.decode()
-    if re.search(r'"local\.screen-recording-cleaner"\s*=>\s*(?:true|disabled)\b', text):
+    return bool(re.search(r'"local\.screen-recording-cleaner"\s*=>\s*(?:true|disabled)\b', text))
+
+
+def require_resumed(command):
+    if is_paused(command):
         raise RuntimeError('The cleaner is paused. Double-click its Resume shortcut before installing, upgrading, or rolling back.')
+
+
+def paused_agent_path(agent):
+    return agent.with_name(agent.stem + '.paused-menu.plist')
+
+
+def paused_service_definition(support, config_path, agent):
+    config = json.loads(config_path.read_text())
+    label = plistlib.loads(agent.read_bytes())['Label']
+    return {'Label': label + '.paused-menu',
+            'ProgramArguments': [str(support / UI_BINARY), '--paused', config['output'],
+                                 str(agent), str(support / 'Resume.command')],
+            'RunAtLoad': True, 'KeepAlive': {'SuccessfulExit': False}, 'ThrottleInterval': 30,
+            'ProcessType': 'Interactive', 'Umask': 63,
+            'StandardOutPath': str(support / 'launchd.log'),
+            'StandardErrorPath': str(support / 'launchd.log')}
 
 
 def resume_shortcut(support, output):
@@ -130,6 +152,10 @@ def install(user_home=Path.home(), command=subprocess.run):
         definition = service_definition(support, config_path)
         agent.parent.mkdir(parents=True, exist_ok=True)
         put_once(agent, plistlib.dumps(definition))
+        paused_agent = paused_agent_path(agent)
+        put_once(paused_agent, plistlib.dumps(paused_service_definition(support, config_path, agent)))
+        if command(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{PAUSED_LABEL}'], capture_output=True).returncode:
+            command(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', str(paused_agent)], check=True)
         target = f"gui/{os.getuid()}/local.screen-recording-cleaner"
         registered = command(["/bin/launchctl", "print", target], capture_output=True)
         if registered.returncode:

@@ -37,6 +37,8 @@ class UpgradeTests(unittest.TestCase):
         self.original_ledger = self.ledger.read_bytes()
         self.original_agent = self.agent.read_bytes()
         self.loaded = True
+        self.menu_loaded = False
+        self.paused = False
         self.fail_start = False
         self.calls = []
 
@@ -46,10 +48,18 @@ class UpgradeTests(unittest.TestCase):
     def command(self, args, **kwargs):
         action = args[1]
         self.calls.append(action)
+        if action == 'print-disabled':
+            state = 'disabled' if self.paused else 'enabled'
+            return subprocess.CompletedProcess(args, 0, stdout=f'"local.screen-recording-cleaner" => {state}')
+        menu = args[-1].endswith('.paused-menu') or args[-1].endswith('.paused-menu.plist')
         if action == 'print':
-            return subprocess.CompletedProcess(args, 0 if self.loaded else 1)
+            loaded = self.menu_loaded if menu else self.loaded
+            return subprocess.CompletedProcess(args, 0 if loaded else 1)
         if action == 'bootout':
-            self.loaded = False
+            if menu:
+                self.menu_loaded = False
+            else:
+                self.loaded = False
         if action == 'bootstrap':
             # Startup must happen after migration releases the worker lock.
             with (self.support / 'state/lock').open('a') as lock:
@@ -57,7 +67,11 @@ class UpgradeTests(unittest.TestCase):
             if self.fail_start:
                 self.fail_start = False
                 raise subprocess.CalledProcessError(5, args)
-            self.loaded = True
+            if menu:
+                self.menu_loaded = True
+            else:
+                self.assertFalse(self.paused, 'An upgrade must never start a paused worker')
+                self.loaded = True
         return subprocess.CompletedProcess(args, 0)
 
     def run_upgrade(self):
@@ -92,17 +106,33 @@ class UpgradeTests(unittest.TestCase):
         self.assertFalse((self.support / 'Resume.command').exists())
         self.assertTrue(self.loaded)
 
-    def test_paused_upgrade_leaves_programs_and_history_untouched(self):
-        original = {path: path.read_bytes() for path in self.support.rglob('*') if path.is_file()}
-        for state in ('true', 'disabled'):
-            with self.subTest(state=state):
-                def paused(args, **kwargs):
-                    self.assertEqual(args[1], 'print-disabled')
-                    return subprocess.CompletedProcess(args, 0, stdout=f'"local.screen-recording-cleaner" => {state}')
-                with self.assertRaisesRegex(RuntimeError, 'cleaner is paused'):
-                    upgrade.upgrade(self.home, paused)
-                self.assertEqual(self.agent.read_bytes(), self.original_agent)
-                self.assertEqual({path: path.read_bytes() for path in self.support.rglob('*') if path.is_file()}, original)
+    def test_paused_upgrade_preserves_pause_and_history_and_adds_resume_menu(self):
+        self.paused = True
+        self.loaded = False
+        self.run_upgrade()
+        self.assertFalse(self.loaded)
+        self.assertTrue(self.menu_loaded)
+        self.assertTrue(self.paused)
+        self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+        menu = plistlib.loads(upgrade.paused_agent_path(self.agent).read_bytes())
+        self.assertEqual(menu['KeepAlive'], {'SuccessfulExit': False})
+        self.assertNotIn('WatchPaths', menu)
+        self.assertNotIn('StartInterval', menu)
+        self.assertNotIn('StartCalendarInterval', menu)
+        self.assertTrue((self.support / 'Resume.command').exists())
+
+    def test_failed_paused_upgrade_restores_without_resuming_worker(self):
+        self.paused = True
+        self.loaded = False
+        self.fail_start = True
+        with self.assertRaisesRegex(RuntimeError, 'previous service restored'):
+            self.run_upgrade()
+        self.assertFalse(self.loaded)
+        self.assertFalse(self.menu_loaded)
+        self.assertTrue(self.paused)
+        self.assertEqual(self.agent.read_bytes(), self.original_agent)
+        self.assertEqual(self.ledger.read_bytes(), self.original_ledger)
+        self.assertFalse(upgrade.paused_agent_path(self.agent).exists())
 
     def test_paused_rollback_keeps_the_resume_shortcut_and_installed_files(self):
         self.run_upgrade()
@@ -187,7 +217,7 @@ class UpgradeTests(unittest.TestCase):
             thread.start()
             time.sleep(.3)
             self.assertTrue(thread.is_alive())
-            self.assertEqual(self.calls, ['print-disabled'])
+            self.assertEqual(self.calls, [])
             self.assertEqual(self.agent.read_bytes(), self.original_agent)
             holder.stdin.close()
             holder.wait(timeout=5)

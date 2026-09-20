@@ -7,7 +7,7 @@ import subprocess
 import time
 
 from cleaner import digest, save
-from install import install
+from install import PAUSED_LABEL, install, is_paused
 from upgrade import check_installation, confirm, locations, rollback, stop, upgrade
 
 
@@ -34,6 +34,17 @@ def wait_for_worker(support, command, timeout=30):
         # This bounded setup check is not installed as a recurring service.
         time.sleep(.25)
     raise RuntimeError('The worker did not start cleanly; inspect launchd.log and any macOS folder permission prompt')
+
+
+def wait_for_paused_menu(command, timeout=30):
+    target = f'gui/{os.getuid()}/{PAUSED_LABEL}'
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = command(['/bin/launchctl', 'print', target], capture_output=True, text=True)
+        if result.returncode == 0 and re.search(r'\bpid = \d+', result.stdout or ''):
+            return
+        time.sleep(.25)
+    raise RuntimeError('The paused menu did not start; inspect launchd.log or use the Resume shortcut')
 
 
 def capture_location(command):
@@ -76,13 +87,16 @@ def setup(user_home=Path.home(), command=subprocess.run):
     else:
         install(user_home, command)
     try:
-        wait_for_worker(support, command)
+        if is_paused(command):
+            wait_for_paused_menu(command)
+        else:
+            wait_for_worker(support, command)
         configure_capture_location(support, command)
         if updating:
             confirm(user_home)
     except Exception:
         if replaced:
-            rollback(user_home, command)
+            rollback(user_home, command, preserve_pause=True)
         elif not updating:
             stop(command)
             journal = json.loads(marker.read_text())
