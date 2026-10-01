@@ -8,7 +8,7 @@ A small **film icon in the menu bar appears while work is pending or processing 
 
 The icon starts near the clock, with progress percentages inside the menu so it stays compact. While it is visible, hold **⌘ and drag** to move it; macOS remembers the position for the next recording. This avoids placing a new, wide indicator behind the camera notch on a crowded menu bar.
 
-To rebuild this tool with an agent, use the [rebuild prompt](PROMPT.md).
+For agent work, start with the [Screen Recording Cleaner skill](SKILL.md) or its short [rebuild prompt](PROMPT.md). The skill defines the agreed update for hardware encoding and size/quality choices; the implementation described below still uses the existing software encoder and soft size target until that update ships.
 
 ## Menu bar progress
 

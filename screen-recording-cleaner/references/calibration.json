@@ -1,0 +1,65 @@
+{
+  "sample": "seconds 40 through 48 of the supplied clean recording",
+  "resolution": [
+    3022,
+    1634
+  ],
+  "reference": "lossless FFV1 decoded from supplied recording",
+  "comparison": "SSIM at full resolution with decoded frames aligned by index",
+  "scope": "one run per setting; encoder times only; no fan, temperature, energy or end-to-end cleaner measurements",
+  "results": [
+    {
+      "variant": "software",
+      "bytes": 11748571,
+      "wall_seconds": 18.26,
+      "cpu_seconds": 54.790000000000006,
+      "ssim": 0.995178
+    },
+    {
+      "variant": "hardware-6m",
+      "bytes": 6252436,
+      "wall_seconds": 6.28,
+      "cpu_seconds": 7.67,
+      "ssim": 0.985148
+    },
+    {
+      "variant": "hardware-10m",
+      "bytes": 10249511,
+      "wall_seconds": 6.46,
+      "cpu_seconds": 7.81,
+      "ssim": 0.991034
+    },
+    {
+      "variant": "hardware-20m",
+      "bytes": 17326246,
+      "wall_seconds": 6.24,
+      "cpu_seconds": 7.86,
+      "ssim": 0.994277
+    }
+  ],
+  "date": "2026-09-30",
+  "purpose": "Starting evidence for calibrating the hardware quality policy, not shipping thresholds.",
+  "source_kind": "An already-cleaned H.264 recording; not an original macOS capture.",
+  "availability": "The source video and sample outputs are not bundled with this skill. Use representative original captures to reproduce and broaden the experiment.",
+  "software_settings": {
+    "encoder": "libx264",
+    "preset": "fast",
+    "crf": 18,
+    "threads": 4
+  },
+  "hardware_settings": {
+    "encoder": "hevc_videotoolbox",
+    "allow_sw": false,
+    "target_bitrates_mbps": [
+      6,
+      10,
+      20
+    ]
+  },
+  "limitations": [
+    "One excerpt, one run per setting; other machine activity was not controlled.",
+    "Timing covers encoding, not sample extraction, similarity analysis, full verification, or installed delivery.",
+    "No fan noise, temperature, or energy measurement.",
+    "Full-file byte targets and perceptual quality cannot be inferred from these bitrates for arbitrary recordings."
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Screen Recording Cleaner"
+  short_description: "Build and update the macOS screen recording cleaner"
+  default_prompt: "Use $screen-recording-cleaner to update the tool for my size, quality, and hardware-encoding preferences."
